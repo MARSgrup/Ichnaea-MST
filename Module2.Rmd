@@ -1,0 +1,826 @@
+---
+title: 'Ichnaea-MST. R notebook. Module II: Upload and classification module'
+author: 'Javier Méndez Viera, Antonio Monleón Getino, Alejandro Rodríguez Mena, Anicet Ramon Blach Gisbert'
+output:
+  html_document:
+    fig_height: 12
+    fig_width: 12
+    highlight: tango
+    theme: spacelab
+  pdf_document:
+    toc: yes
+  word_document:
+    toc: yes
+---
+
+```{=html}
+<style>
+body {text-align: justify}
+</style>
+```
+
+# Program version and list of changes
+Version: 1.0.1 4
+
+# Welcome message
+Ichnaea-MST is a set of R scripts developed for training and classification using the H2O machine learning framework, particularly use H2O AutoML, which allows users to explore several machine learning algorithms, offering numerous advantages such as the automation of model creation and tuning. This enables users to train multiple models, select the best one without manual intervention, and provides methods to explain the generated models. It is well-established that machine learning algorithms can be enhanced through data preprocessing techniques, such as scaling and centering data. H2O AutoML automatically handles data preprocessing, including the imputation of missing values, encoding of categorical variables, scaling of features, and detection of outliers.
+
+The R script has been developed for novice users with little to no experience in machine learning.
+
+The objective is to provide the microbiology community with a straightforward method for exploring machine learning in Microbial Source Tracking (MST) scenarios. For local use on personal computers, we recommend the utilisation of this R Notebook. Individuals with no prior experience of R or RStudio are welcome to access the software remotely via the provided web address, which can be used as a graphical user interface (GUI) under a Shiny application.
+
+```{r}
+# Display a welcome message 
+svDialogs::dlg_message('Welcome to the Ichnaea-MST upload and classification module. This module facilitates the upload of a self-learning model, trained on the H2O autoML framework. Please consult the help tutorials beforehand to ensure a smooth experience. To proceed, press Enter or click OK.')$res
+```
+
+
+# Launch H2O and load the previosuly trained model
+This section launches the H2O framework. The user is prompted to select the file containing the previously trained model under H2O. Further information can be found in the help section.
+
+```{r message=FALSE, warning=FALSE}
+# Launch h2o
+library(h2o)
+svDialogs::dlg_message('The process of setting up H2O will begin immediately. To proceed press Enter or click OK.')$res
+h2o.init()
+
+# Display a message dialog prompting the user to indicate the file containing the trained model
+svDialogs::dlg_message('It is imperative that the file containing the previously trained model is indicated. Despite the absence of certain MST markers, H2O is capable of classifying the dataset. However, it is crucial to emphasise that the accuracy of the results is contingent upon the presence of all the MST markers used in the training process, particularly those markers that showed the greater importance after the training. To proceed, press Enter or click OK.')$res
+
+# Open a file dialog for the user to select the previously trained model, allowing all file types
+svDialogs::dlg_open(title = "Select the previously trained model file", filters = svDialogs::dlg_filters[c('All'), ])$res->data
+
+h2o.loadModel(data)->trained.model
+```
+
+
+
+# Summary of model characteristics
+In this section, a dialog box containing a minimum amount of information is displayed. In the event that the user requires additional information, they are prompted to decide whether to save the model characteristics, training performance and confusion matrix embedded into the file of the model.
+
+```{r}
+# Dialog to inform that importance will be displayed
+svDialogs::dlg_message(paste('Please read the following summary of the uploaded model carefully. The name of the model is',as.character(trained.model@model_id),', which is a ',as.character(trained.model@algorithm), ',class and contains these MST markers:', paste(as.character(h2o.varimp(trained.model)$variable), collapse = ", ")))$res
+
+# Obtain the importance of the variables
+var_imp <- h2o.varimp(trained.model)
+
+# Filter the variables with scaled_importance > 0.5
+filtered_vars <- (var_imp[var_imp$scaled_importance > 0.5, ])$variable
+
+svDialogs::dlg_message(paste('The following MST markers were found to be the most important, please try to include them in the classification dataset: ',paste(as.character(var_imp[var_imp$scaled_importance > 0.5, "variable"]), collapse = ", "), '. To Subsequently, a graph of importance with each MST marker will be saved as "Importance.jpeg". To proceed, press Enter or click OK.'))$res
+
+jpeg('Importance.jpeg', res = 600, width = 8, height = 10, units = 'in')
+# Verify the type of model
+unsupported_models <- c("stackedensemble", "deeplearning", "naivebayes", "glm")
+
+if (!(trained.model@algorithm %in% unsupported_models)) {
+  try(total_variables <- length(h2o.varimp(trained.model)$variable))  
+  suppressMessages(suppressWarnings(
+    print(try(h2o.varimp_plot(trained.model, num_of_features = total_variables)))
+  ))
+} else {
+  message("Variable importance plot is not available for non-tree based models.")
+  
+  grid::grid.newpage()
+  text.jpeg <- paste(
+    "Variable importance plot is not available for",
+    as.character(trained.model@algorithm),
+    "models", sep = " "
+  )
+  grid::grid.text(text.jpeg, x = 0.5, y = 0.5, gp = grid::gpar(fontsize = 16, col = "black"))
+}
+dev.off()
+
+svDialogs::dlg_message('The subsequent query pertains to the information saved with the model, which includes the training performance metrics and the confusion matrix. To proceed press Enter or click OK.')$res
+
+repeat {
+  # Display an input dialog asking if the information have or not to be displayed
+svDialogs::dlgInput('Should the information need to be displayed and saved in an HTML file, please proceed by indicating whether this requirement applies (y/n)?', password = TRUE)$res->doyouwant
+  
+ # Check if the user input is valid (either 'y', 'Y', 'n', or 'N')
+  if (doyouwant %in% c('y','Y','n','N')) {
+    break
+  } else {
+    # Prompt the user to enter a valid response if the input is invalid
+    svDialogs::dlg_message('Please enter a valid response. To continue, please press the "Enter" key or click the "OK" button.')$res
+  }
+}
+
+if (tolower(doyouwant) == 'y') {
+library(htmltools)
+  
+# Create HTML content for the classification results
+model_details <- capture.output((trained.model)) 
+html_content <- tags$html(tags$head(tags$title("Information about the uploaded trained model")), tags$body(tags$h1(data), tags$pre(paste(model_details, collapse = "\n"))))
+
+# Save HTML content to a file
+save_html(html_content, file = "Previously trained model details.html")
+}
+```
+
+
+
+# File selection function
+This section comprises a set of libraries for data file manipulation.
+```{r message=FALSE, warning=FALSE}
+# Load necessary libraries
+library(readr)       # To read and write CSV files
+library(readxl)      # To read Excel files (xlsx)
+library(writexl)     # To write Excel files (xlsx)
+library(data.table)  # For fast data reading and writing
+library(readODS)     # To read ODS files
+library(haven)       # To read and write SPSS, Stata, and SAS files
+library(foreign)     # To handle external statistical data formats
+library(DataExplorer) # For quick data exploration and visualization
+
+# Function to import data from various file formats
+import_data <- function(file_path) {
+  # Get the file extension
+  file_extension <- tools::file_ext(file_path)
+  
+  # Select the appropriate reading method based on the file extension
+  switch(file_extension, 
+         csv = read_csv(file_path),     # Read CSV files
+         xlsx = read_excel(file_path),  # Read Excel files
+         txt = fread(file_path),        # Read text files
+         ods = read_ods(file_path),     # Read ODS files
+         dta = read_dta(file_path),     # Read Stata files
+         sav = read_sav(file_path),     # Read SPSS files
+         stop('Unsupported file format') # Throw an error if the format is unsupported
+  )
+}
+
+# Function to save data to various file formats
+save_data <- function(data, file_path) {
+  # Get the file extension
+  file_extension <- tools::file_ext(file_path)
+  
+  # Select the appropriate writing method based on the file extension
+  switch(file_extension, 
+         csv = fwrite(data, file_path),              # Write CSV files
+         xlsx = write_xlsx(data, file_path),         # Write Excel files
+         txt = fwrite(data, file_path, sep = "\t"),  # Write text files with tab delimiters
+         ods = write_ods(data, file_path),           # Write ODS files
+         dta = write_dta(data, file_path),           # Write Stata files
+         sav = write_sav(data, file_path),           # Write SPSS files
+         stop("Unsupported file format")             # Throw an error if the format is unsupported
+  )
+}
+
+# Try to launch the default application to open the spreadsheet containing data
+launch_spreadsheet <- function() {
+  # File selection dialog
+  filename <- svDialogs::dlg_open(
+    title = "Select the spreadsheet file to open",
+    filters = svDialogs::dlg_filters[c('All'), ]
+  )$res
+
+  if (is.null(filename) || filename == "") {
+    cat("No file selected. Operation cancelled.\n")
+    return(invisible())
+  }
+
+  # Normalize path
+  filename <- normalizePath(filename, winslash = "\\", mustWork = FALSE)
+
+  # Warn if file is in OneDrive
+  if (grepl("OneDrive", filename, ignore.case = TRUE)) {
+    warning("⚠️ The file is located in a OneDrive folder. This may cause issues When is opened.")
+  }
+
+  # Remove LibreOffice lock file if it exists
+  lock_file <- file.path(dirname(filename), paste0(".~lock.", basename(filename), "#"))
+  if (file.exists(lock_file)) {
+    message("Removing existing lock file...")
+    file.remove(lock_file)
+  }
+
+  # Detect OS and define LibreOffice Calc path
+  os_type <- Sys.info()[["sysname"]]
+  libreoffice_cmd <- NULL
+
+  if (os_type == "Windows") {
+    possible_paths <- c(
+      "C:\\Program Files\\LibreOffice\\program\\scalc.exe",
+      "C:\\Program Files (x86)\\LibreOffice\\program\\scalc.exe"
+    )
+    for (path in possible_paths) {
+      if (file.exists(path)) {
+        libreoffice_cmd <- path
+        break
+      }
+    }
+
+    if (!is.null(libreoffice_cmd)) {
+      cmd <- paste("start", shQuote(libreoffice_cmd), shQuote(filename))
+      shell(cmd, wait = TRUE)
+      cat("✅ LLibreOffice Calc or Excel is launched successfully.\n")
+    } else {
+      warning("🛑 LibreOffice Calc not found in standard locations.")
+    }
+
+  } else if (os_type == "Linux") {
+    Sys.setenv(LD_LIBRARY_PATH = "/usr/lib/libreoffice/program")
+    libreoffice_cmd <- "libreoffice"
+    result <- system2(command = libreoffice_cmd, args = c("--calc", shQuote(filename)), wait = FALSE)
+    if (result == 0) {
+      cat("✅ LLibreOffice Calc or Excel is launched successfully.\n")
+    } else {
+      warning("⚠️ Failed to launch LibreOffice Calc.")
+    }
+
+  } else if (os_type == "Darwin") {  # macOS
+    libreoffice_cmd <- "/Applications/LibreOffice.app/Contents/MacOS/soffice"
+    result <- system2(command = libreoffice_cmd, args = c("--calc", shQuote(filename)), wait = FALSE)
+    if (result == 0) {
+      cat("✅ LLibreOffice Calc or Excel is launched successfully.\n")
+    } else {
+      warning("⚠️ Failed to launch LibreOffice Calc.")
+    }
+
+  } else {
+    warning("🛑 Unsupported operating system.")
+  }
+
+  return(invisible())
+}
+
+# launch_spreadsheet() <- to a window to select the file & to open it in Calc
+
+# Divergence function (JSD+TVD)
+# Load required library
+library(philentropy)
+
+# Normalize a vector to a probability distribution
+normalize <- function(x) {
+  x <- x[!is.na(x)]
+  freq <- table(x)
+  prob <- freq / sum(freq)
+  return(prob)
+}
+
+# Jensen-Shannon Divergence
+calculate_jsd <- function(p, q) {
+  all_vals <- union(names(p), names(q))
+  p_full <- rep(0, length(all_vals))
+  q_full <- rep(0, length(all_vals))
+  names(p_full) <- all_vals
+  names(q_full) <- all_vals
+  p_full[names(p)] <- p
+  q_full[names(q)] <- q
+  mat <- rbind(p_full, q_full)
+  tryCatch({
+    as.numeric(distance(mat, method = "jensen-shannon"))
+  }, error = function(e) NA)
+}
+
+# Total Variation Distance
+calculate_tv <- function(p, q) {
+  all_vals <- union(names(p), names(q))
+  p_full <- rep(0, length(all_vals))
+  q_full <- rep(0, length(all_vals))
+  names(p_full) <- all_vals
+  names(q_full) <- all_vals
+  p_full[names(p)] <- p
+  q_full[names(q)] <- q
+  sum(abs(p_full - q_full)) / 2
+}
+
+# Interpretation functions
+interpret_jsd <- function(jsd) {
+  if (is.na(jsd)) "Not computable"
+  else if (jsd == 0) "Identical"
+  else if (jsd <= 0.2) "Very similar"
+  else if (jsd <= 0.4) "Moderate difference"
+  else if (jsd <= 0.6) "Notable difference"
+  else "Very different"
+}
+
+interpret_tv <- function(tv) {
+  if (is.na(tv)) "Not computable"
+  else if (tv < 0.1) "Very similar"
+  else if (tv < 0.3) "Moderate difference"
+  else if (tv < 0.5) "Notable difference"
+  else "Very different"
+}
+
+# Overall interpretation based on average score
+overall_interpretation <- function(jsd_int, tv_int) {
+  interpretations <- c(jsd_int, tv_int)
+  score_map <- c(
+    "Identical" = 0,
+    "Very similar" = 1,
+    "Moderate difference" = 2,
+    "Notable difference" = 3,
+    "Very different" = 4,
+    "Not computable" = NA
+  )
+  scores <- score_map[interpretations]
+  avg_score <- mean(as.numeric(scores), na.rm = TRUE)
+  
+  if (is.na(avg_score)) {
+    return("Not computable")
+  } else if (avg_score <= 1) {
+    return("Very similar")
+  } else if (avg_score <= 2) {
+    return("Moderate difference")
+  } else if (avg_score <= 3) {
+    return("Notable difference")
+  } else {
+    return("Very different")
+  }
+}
+
+# Main function to compare all predictors
+compare_distributions <- function(train_data, classify_data) {
+  common_vars <- intersect(colnames(train_data), colnames(classify_data))
+  train_data <- train_data[, common_vars, drop = FALSE]
+  classify_data <- classify_data[, common_vars, drop = FALSE]
+  
+  results <- data.frame(
+    Predictor = character(),
+    JSD = numeric(),
+    JSD_Interpretation = character(),
+    TVD = numeric(),
+    TVD_Interpretation = character(),
+    Overall_Interpretation = character(),
+    stringsAsFactors = FALSE
+  )
+  
+  for (predictor in common_vars) {
+    p <- normalize(train_data[[predictor]])
+    q <- normalize(classify_data[[predictor]])
+    
+    jsd <- calculate_jsd(p, q)
+    tv <- calculate_tv(p, q)
+    
+    jsd_int <- interpret_jsd(jsd)
+    tv_int <- interpret_tv(tv)
+    overall <- overall_interpretation(jsd_int, tv_int)
+    
+    results <- rbind(results, data.frame(
+      Predictor = predictor,
+      JSD = jsd,
+      JSD_Interpretation = jsd_int,
+      TVD = tv,
+      TVD_Interpretation = tv_int,
+      Overall_Interpretation = overall,
+      stringsAsFactors = FALSE
+    ))
+  }
+
+  # Add overall summary row
+  avg_jsd <- mean(results$JSD, na.rm = TRUE)
+  avg_tv <- mean(results$TVD, na.rm = TRUE)
+  avg_jsd_int <- interpret_jsd(avg_jsd)
+  avg_tv_int <- interpret_tv(avg_tv)
+  avg_overall <- overall_interpretation(avg_jsd_int, avg_tv_int)
+
+  summary_row <- data.frame(
+    Predictor = "OVERALL",
+    JSD = avg_jsd,
+    JSD_Interpretation = avg_jsd_int,
+    TVD = avg_tv,
+    TVD_Interpretation = avg_tv_int,
+    Overall_Interpretation = avg_overall,
+    stringsAsFactors = FALSE
+  )
+
+  results <- rbind(results, summary_row)
+  return(results)
+}
+
+# Function to detect values < LOD and Zero-zalues
+LOD_detection <- function(thresholds_df, classify) {
+  # Step 1: Find common variables
+  common_vars <- intersect(colnames(thresholds_df), colnames(classify))
+  
+  # Step 2: Ensure numeric comparison
+  classify_numeric <- as.data.frame(lapply(classify[common_vars], as.numeric))
+  thresholds_numeric <- as.numeric(thresholds_df[1, common_vars])
+  
+  # Step 3: Check values below threshold
+  below_threshold <- mapply(function(col, threshold) {
+    col < threshold
+  }, classify_numeric, thresholds_numeric, SIMPLIFY = FALSE)
+  
+  below_threshold_df <- as.data.frame(below_threshold)
+  
+  # Step 4: Calculate percentage of TRUEs (below threshold)
+  percent_true_per_row <- rowMeans(below_threshold_df, na.rm = TRUE) * 100
+  
+  # Step 5: Calculate percentage of zeros
+  percent_zeros_df <- as.data.frame(lapply(classify_numeric, function(col) col == 0))
+  percent_zeros_per_row <- rowMeans(percent_zeros_df, na.rm = TRUE) * 100
+  
+  # Step 6: Return result with sample ID (assumed to be in first column of classify)
+  result <- data.frame(
+    ID = classify[[1]],
+    LOD = percent_true_per_row,
+    Zeros = percent_zeros_per_row
+  )
+  
+  return(result)
+}
+
+# LOD_detection(metadata[2,],toclassify) para correr la función
+```
+
+
+
+# Selection of the file containing data to be classified
+The user is prompted to select the file containing the data to be classified. Despite the fact that H2O AutoML is capable of classification even in the absence of an MST parameter, it is recommended that all the parameters utilised in the previously training model be included. It is imperative to ensure that the dataset is structured in an appropriate manner.
+
+```{r message=FALSE, warning=FALSE}
+# Display a message dialog prompting the user to select the file containing the data to be classified
+svDialogs::dlg_message('Please select the file that contains the data to be classified. To proceed, please press the "Enter" key or click the "OK" button.')$res
+
+# Open a file dialog for the user to select the dataset to be classified, allowing all file types
+svDialogs::dlg_open(title = "Select the dataset to be classified", filters = svDialogs::dlg_filters[c('All'), ])$res->toclassify
+
+# Import the selected data and convert it into a data frame
+toclassify<-as.data.frame(import_data(toclassify))
+```
+
+# Analysis of divergence between training and classification and possible problems with low occurrences
+
+```{r message=FALSE, warning=FALSE}
+# Display a message about the availability of the augmented dataset with metadata
+svDialogs::dlg_message('The following questions concern the availability of the augmented dataset file, including metadata, for divergence analysis between the classification and training datasets.')$res
+
+repeat {
+  doyouwant.augmented <- svDialogs::dlgInput('Could you please confirm whether the file is available in a compatible format (y/n)?',password = TRUE)$res
+
+  if (doyouwant.augmented %in% c('y', 'Y', 'n', 'N')) break
+
+  svDialogs::dlg_message('Please enter a valid response. To continue, press "Enter" or click "OK".')$res
+}
+
+if (tolower(doyouwant.augmented) == 'y') {svDialogs::dlg_message('Please indicate the file that contains the augmented data with metadata. To proceed, press "Enter" or click "OK".')$res
+  data <- svDialogs::dlg_open(title = "Select the augmented dataset for divergence analysis",filters = svDialogs::dlg_filters[c('All'), ])$res
+
+  divergence.data <- as.data.frame(import_data(data))
+  comparative_distributions <- try(compare_distributions(divergence.data, toclassify))
+
+  svDialogs::dlg_message(paste('The divergence between the augmented dataset and the classification dataset shows:',
+      '"', comparative_distributions$Overall_Interpretation[length(comparative_distributions$Overall_Interpretation)], '".'))$res
+
+  metadata <- divergence.data[c(1, 2, 3), -1]
+  lod_zeros <- LOD_detection(metadata[2, metadata[3, ] == 1], toclassify)
+
+  svDialogs::dlg_message(paste('The training dataset contains', length(which(metadata[3, ] == 1)), 'MST markers.',
+      'The next step is to verify which classification samples have 100% of MST markers below the limit of detection (LOD) or are zero.',
+      'If any of these events occur, a pop-up window will indicate the affected samples.',
+      'The process can continue, but these samples are at high risk of misclassification.', collapse = " "))$res
+
+  if (length(lod_zeros$LOD) != 0) {
+    svDialogs::dlg_message(paste('The following samples are at RISK OF MISCLASSIFICATION due to all MST markers being below their LOD:',
+        paste(lod_zeros$ID[lod_zeros$LOD == 100], collapse = ", ")))$res
+  }
+
+  if (length(lod_zeros$Zeros) != 0) {
+    svDialogs::dlg_message(paste('The following samples are at VERY HIGH RISK OF MISCLASSIFICATION because all MST markers have a value of zero:',
+        paste(lod_zeros$ID[lod_zeros$Zeros == 100], collapse = ", ")
+      ))$res
+  }
+
+} else {
+  repeat {
+    doyouwant.training <- svDialogs::dlgInput('The following questions concern the availability of the original training dataset. Is the file available in a compatible format (y/n)?',password = TRUE)$res
+
+    if (doyouwant.training %in% c('y', 'Y', 'n', 'N')) break
+
+    svDialogs::dlg_message('Please enter a valid response. To continue, press "Enter" or click "OK".')$res
+  }
+
+  if (tolower(doyouwant.training) == 'y') {svDialogs::dlg_message('Please indicate the file that contains the original training data with metadata. To proceed, press "Enter" or click "OK".')$res
+
+    data <- svDialogs::dlg_open(title = "Select the original training dataset for LOD and Zero-values analysis",filters = svDialogs::dlg_filters[c('All'), ])$res
+
+    LOD.data <- as.data.frame(import_data(data))
+    metadata <- LOD.data[c(1, 2, 3), -1]
+    lod_zeros <- LOD_detection(metadata[2, metadata[3, ] == 1], toclassify)
+
+    svDialogs::dlg_message(paste('The training dataset contains', length(which(metadata[3, ] == 1)), 'MST markers.',
+        'The next step is to verify which classification samples have 100% of MST markers below the limit of detection (LOD) or are zero.',
+        'If any of these events occur, a pop-up window will indicate the affected samples.',
+        'The process can continue, but these samples are at high risk of misclassification.', collapse = " "))$res
+
+    if (length(lod_zeros$LOD) != 0) {
+      svDialogs::dlg_message(paste('The following samples are at RISK OF MISCLASSIFICATION due to all MST markers being below their LOD:',
+          paste(lod_zeros$ID[lod_zeros$LOD == 100], collapse = ", ")))$res
+    }
+
+    if (length(lod_zeros$Zeros) != 0) {
+      svDialogs::dlg_message(paste('The following samples are at VERY HIGH RISK OF MISCLASSIFICATION because all MST markers have a value of zero:',
+          paste(lod_zeros$ID[lod_zeros$Zeros == 100], collapse = ", ")))$res
+    }
+  }
+}
+```
+
+
+
+
+
+# In the event that a t90 amendment is employed for the purpose of modifying classification
+The user is prompted to select the file containing the dataset with the natural decays, particularly the t90 values. It is imperative to note that the t90 denotes the time required for a decay of 1 log (90%) of the initial occurrence. Subsequently, the user is prompted to indicate the time of persistence for which they wish to simulate. It is imperative to use the same units that the t90 values are expressed in within this dataset. By selecting the desired time of persistence, the user can effectively model the decay behaviour of the MST markers. The time entered by the user is taken as the residence time, so the values in the classification dataset are modified (in fact, they are increased) taking into account the natural decay rates. This adjustment is pivotal in ensuring that the dataset accurately reflects the extended duration during which the parameters persist in the environment. The incorporation of natural decay rates within the simulation framework is instrumental in providing a more authentic representation of the temporal evolution of the parameters. 
+However, it is important to note that certain decays are temperature-dependent, and as a consequence, different t90 values for the same MST marker may be reported in the literature.
+
+```{r message=FALSE, warning=FALSE}
+# Display a message dialog explaining the prompt for indicating the availability of a file for t90-based decays, if not a manual dilution will be set
+
+svDialogs::dlg_message('Next, you will be prompted to indicate whether the t90 values are available for application, taking into account natural decay. Please note that these decays are currently only applicable to trained models using quantitative MST markers. To proceed, please press the "Enter" key or click the "OK" button.')$res
+
+# Repeat the process of asking for the availability of the t90 file until a valid response is provided
+repeat {
+  svDialogs::dlgInput('Please confirm whether a file containing the t90 of the MST-markers used in the training is available (y/n).', password = TRUE)$res->t90_amendment
+  if (t90_amendment %in% c('y','Y','n','N')) {
+    break
+  } else {
+    svDialogs::dlg_message('Please enter a valid response. To continue, please press the "Enter" key or click the "OK" button.')$res
+  }
+}
+
+# If the user indicates the t90 file is available, proceed with the following steps
+if (tolower(t90_amendment) == 'y') {
+  # Display a message dialog prompting the user to select the file containing the t90 data
+  svDialogs::dlg_message('Please select the file that contains the t90 data. To proceed, please press the "Enter" key or click the "OK" button.')$res
+  
+  # Open a file dialog for the user to select the dataset containing the t90 values, allowing all file types
+  svDialogs::dlg_open(title = "Select the dataset containing the t90 values", filters = svDialogs::dlg_filters[c('All'), ])$res->t90s
+  
+  # Import the selected data and convert it into a data frame
+  t90s<-as.data.frame(import_data(t90s))
+}
+```
+
+
+
+## Print and save in a file the result of the classification of the samples with the previously trained model
+In this section, the classification process is initiated. It is imperative to emphasise two aspects: firstly, the necessity of the structure that the dataset must possess for the purpose of classification. For further details, please refer to the help documentation. Secondly, with the H2O framework, there is no necessity to remove extra variables that are not found in the trained models (specifically the reduced model), meaning that the user does not need to modify the original structure of the data.
+
+The user is prompted to save the results in a spreadsheet file.
+```{r message=FALSE, warning=FALSE}
+# Convert the data to H2O format and exclude the first column
+toclassify_pred <- as.h2o(toclassify[, c(-1)],destination_frame = 'toclassify')
+# Predict using the reduced H2O model
+toclassify_pred <- h2o.predict(trained.model, toclassify_pred)
+
+# Convert the predictions to a data frame
+as.data.frame(toclassify_pred) -> toclassify_pred
+# Combine the original IDs with the predictions
+cbind(toclassify[, 1], toclassify_pred) -> df_pred.reduced
+# Rename the columns of the combined data frame
+names(df_pred.reduced) <- c('ID', names(toclassify_pred))
+
+# Print the combined data frame
+print(df_pred.reduced)
+
+# Capture the model details as text
+model_details <- capture.output(print(df_pred.reduced)) 
+
+# Create HTML content for the classification results
+html_content <- tags$html(tags$head(tags$title("Classification with the previously trained model")), tags$body(tags$h1("Classification without decay"), tags$pre(paste(model_details, collapse = "\n"))))
+
+# Save HTML content to a file
+save_html(html_content, file = 'Classification without decay.html')
+
+# Display a message dialog box to prompt the user to save the classification results
+svDialogs::dlg_message('The subsequent step would be to create a file containing the results of the classification in the form of a data file. It should be noted that the natural decays will not be taken into account. The user is requested to indicate in which spreadsheet format the file should be saved. To proceed, please press the "Enter" key or click the "OK" button.')$res
+
+repeat {
+  # Prompt the user to select the file format for saving the results
+  doyouwant <- svDialogs::dlgInput('Please indicate whether you wish to save the file in the Excel (1), Calc (2), CSV (3), Stata (4) or SPSS (5) spreadsheet format (1 to 5).', password = TRUE)$res
+  
+  # Check if the user input is valid (either '1', '2', '3', '4', or '5')
+  if (doyouwant %in% c('1', '2', '3', '4', '5')) {
+    break
+  } else {
+    # Prompt the user to enter a valid response if the input is invalid
+    svDialogs::dlg_message('Please enter a valid response. To continue, please press the "Enter" key or click the "OK" button.')$res
+  }
+}
+
+# Save the results in the selected file format
+if (doyouwant == '1') {
+  file_path <- 'Classification without decay.xlsx'
+  save_data(df_pred.reduced, file_path)
+  svDialogs::dlg_message('The data file has been generated with the name: "Classification without decay.xlsx". To continue, please press the "Enter" key or click the "OK" button.')$res
+}
+
+if (doyouwant == '2') {
+  file_path <- 'Classification without decay.ods'
+  save_data(df_pred.reduced, file_path)
+  svDialogs::dlg_message('The data file has been generated with the name: "Classification without decay.ods". To continue, please press the "Enter" key or click the "OK" button.')$res
+}
+
+if (doyouwant == '3') {
+  file_path <- 'Classification without decay.csv'
+  save_data(df_pred.reduced, file_path)
+  svDialogs::dlg_message('The data file has been generated with the name: "Classification without decay.csv". To continue, please press the "Enter" key or click the "OK" button.')$res
+}
+
+if (doyouwant == '4') {
+  file_path <- 'Classification without decay.dta'
+  save_data(df_pred.reduced, file_path)
+  svDialogs::dlg_message('The data file has been generated with the name: "Classification without decay.dta". To continue, please press the "Enter" key or click the "OK" button.')$res
+}
+
+if (doyouwant == '5') {
+  file_path <- 'Classification without decay.sav'
+  save_data(df_pred.reduced, file_path)
+  svDialogs::dlg_message('The data file has been generated with the name: "Classification without decay.sav". To continue, please press the "Enter" key or click the "OK" button.')$res
+}
+```
+
+
+
+## Application of the natural decay
+In this section, the decay process is simulated. Up to this point, samples have been classified based on the occurrence of MST markers measured in a matrix. However, it is important to note that the rate of decay of different MST markers can vary significantly due to various factors, including but not limited to, sample temperature, predation, sedimentation, adsorption, and other biological or physical processes.
+These factors can influence the survival or presence of the marker within the matrix under evaluation.
+Consequently, MST markers undergo decay over time, and by determining the decay rate, their previous occurrence after a specific time can be predicted. In this scenario, it is assumed that the inactivation rate is constant, following a linear trend, with a slope that can be determined by the inherent t90 value of the MST-marker. The section commences with the user being prompted to specify the time period for which they wish to simulate. It is imperative to utilise the same time units as those employed in the t90 values (hours, days, weeks, etc.). Subsequent to the entry of the designated time period, the program will calculate the increase in the occurrence using the t90 values of the markers. As this value is inherently numerical, the decay simulation can only be applied to quantitative variables. As with data augmentation, the values modified with the t90 are saved in a spreadsheet, which can be edited by the user. 
+
+The program proceeds by querying whether any modifications have been made to the data file. It is important to note that the program has been designed to be patient and will not proceed until a response has been provided. In the event of a positive response, the program will subsequently prompt the user to upload the modified data file.
+
+Subsequently, the program proceeds to perform the classifications with the MST-marker data modified by their decays. The user is then prompted to select the spreadsheet format in which they wish to save the data.
+
+```{r}
+# Check if the user wants to make corrections based on the previously selected t90 values
+if (tolower(t90_amendment) == 'y') {
+  
+  # Display a message dialog box to inform the user about the upcoming corrections and predictions
+  svDialogs::dlg_message('The subsequent step in the process is the creation of a file containing the corrections that are to be made based on the t90 values. The results of the amendments should be saved in the form of a data file. The user is requested to indicate in which spreadsheet format the file should be saved. It should be noted that, in the event of a specific MST marker being dependent on another MST marker, verification and correction of the data file will be necessary. It should be noted that the opportunity to upload the aforementioned corrections will be available at a later stage.To proceed, please press the "Enter" key or click the "OK" button.')$res
+  
+  # Display a message dialog box to select the t90 time.
+  svDialogs::dlg_message('It is requested that the time for the natural decay be indicated in the same units as the t90 values. It should be noted that a linear model will be applied to amend the classification dataset. To proceed, please press the "Enter" key or click the "OK" button.')$res
+  
+ # Input of the t90.time  
+  repeat {
+    user_input <- svDialogs::dlgInput('Please indicate the time.', password = TRUE)$res
+    
+    # Validate the input
+    if (!is.na(as.numeric(user_input)) && as.numeric(user_input)>0 ) {
+      t90.time <- as.numeric(user_input)
+      svDialogs::dlg_message(paste(t90.time,' has been selected as a decayment time. To continue, please press the "Enter" key or click the "OK" button.'))$res 
+      selected.dilution.fold<-1
+      break
+    } else {svDialogs::dlg_message('That is an invalid value. Please enter a valid value')$res}
+  }
+  
+  # T90 adjustment
+  # Create a temporary copy of the data to classify
+    names(t90s) -> variables
+    toclassify -> toclassify.temp
+    # Adjust the values based on the T90 correction formula
+    for (j in 1:length(variables)) {toclassify.temp[[variables[j]]] <- toclassify[[variables[j]]] / 10^(-as.numeric(t90.time) / t90s[,j])}
+    
+  # Display a message dialog explaining the preference for preserving the data derived from the data modified by the t90s
+
+    svDialogs::dlg_message('The subsequent query pertains to the preference for preserving the data derived from the ammendment using t90 values. It is imperative to undertake this step if one wishes to enter any additional modification of the variables, for instance, to modified a ratio between different MST markers. To proceed, please press the "Enter" key or click the "OK" button.')$res
+
+# If the user indicates that the data should be saved, proceed with the following steps
+  repeat {
+    svDialogs::dlgInput('Please indicate whether you wish to save the file in the Excel (1), Calc (2), CSV (3), Stata (4) or SPSS (5) spreadsheet format (1 to 5).', password = TRUE)$res->doyouwant
+    if (doyouwant %in% c('1','2','3','4','5')) {
+      break
+    } else {
+      svDialogs::dlg_message('Please enter a valid response. To continue, please press the "Enter" key or click the "OK" button.')$res
+    }
+  }  
+  
+ # Save the data in the selected format and display a confirmation message
+  if (doyouwant=='1' ){
+    file_path <- 'MST markers with t90 amendments.xlsx'
+    save_data(toclassify.temp, file_path)
+    svDialogs::dlg_message('The data file has been generated with the name: "MST markers with t90 amendments.xlsx". To continue, please press the "Enter" key or click the "OK" button.')$res
+  }
+  
+  if (doyouwant=='2' ){
+    file_path <- 'MST markers with t90 amendments.ods'
+    save_data(toclassify.temp, file_path)
+    svDialogs::dlg_message('The data file has been generated with the name: "MST markers with t90 amendments.ods". To continue, please press the "Enter" key or click the "OK" button.')$res
+  }
+  
+  if (doyouwant=='3' ){
+    file_path <- 'MST markers with t90 amendments.csv'
+    save_data(toclassify.temp, file_path)
+    svDialogs::dlg_message('The data file has been generated with the name: "MST markers with t90 amendments.csv". To continue, please press the "Enter" key or click the "OK" button.')$res
+  }  
+  
+  if (doyouwant=='4' ){
+    file_path <- 'MST markers with t90 amendments.dta'
+    save_data(toclassify.temp, file_path)
+    svDialogs::dlg_message('The data file has been generated with the name: "MST markers with t90 amendments.dta". To continue, please press the "Enter" key or click the "OK" button.')$res
+  }    
+  
+  if (doyouwant=='5' ){
+    file_path <- 'MST markers with t90 amendments.sav'
+    save_data(toclassify.temp, file_path)
+    svDialogs::dlg_message('The data file has been generated with the name: "MST markers with t90 amendments.sav". To continue, please press the "Enter" key or click the "OK" button.')$res
+  }
+
+# Display a message dialog explaining the preference to reintroduce the augmented data simulation with changes
+svDialogs::dlg_message('The subsequent query pertains to the preference reintoduce the augmentated data simulation with changes. Remember that it is imperative maintained the data estructure and variable names. To proceed, please press the "Enter" key or click the "OK" button.')$res
+
+repeat {
+# Display an input dialog asking if a file containing the modifications in the modified by t90 values data is available
+svDialogs::dlgInput('Before proceeding, it is necessary to ascertain whether any additional modifications have been made to the t90s amended dataset, or whether such modifications are going to be made. In the event of a negative response, the data classification will be proceed with the previously generated ammended dataset. Has carried out any additional modification in the dataset (y/n)?', password = TRUE)$res->doyouwant
+
+ # Check if the user input is valid (either 'y', 'Y', 'n', or 'N')
+  if (doyouwant %in% c('y','Y','n','N')) {
+    break
+  } else {
+    # Prompt the user to enter a valid response if the input is invalid
+    svDialogs::dlg_message('Please enter a valid response. To continue, please press the "Enter" key or click the "OK" button.')$res
+  }
+}
+
+# Display an input dialog asking if LibreOffice Calc needs to be launched
+if (tolower(doyouwant) == 'y'){
+repeat {
+svDialogs::dlgInput('LibreOffice can open files in CSV, Excel and Calc formats. If either LibreOffice Calc or Excel is installed on your computer, R will attempt to open one of these applications. Would you like R to try to open them. (y/n)?', password = TRUE)$res->doyouwant_calc
+
+ # Check if the user input is valid (either 'y', 'Y', 'n', or 'N')
+  if (doyouwant_calc %in% c('y', 'Y', 'n', 'N')) {
+    break
+  } else {
+    # Prompt the user to enter a valid response if the input is invalid
+    svDialogs::dlg_message('Please enter a valid response. To continue, please press the "Enter" key or click the "OK" button.')$res
+  }
+}
+if (tolower(doyouwant_calc) == 'y'){launch_spreadsheet()}
+}
+
+
+
+# If the user indicates the file is available, proceed with the following steps
+if (tolower(doyouwant) == 'y'){
+  # Display a message dialog prompting the user to indicate the file containing the modified augmented file
+  svDialogs::dlg_message('Please indicate the file that contains the modifications. To proceed, please press the "Enter" key or click the "OK" button.')$res
+  
+  # Open a file dialog for the user to select the dataset, allowing all file types
+  svDialogs::dlg_open(title = "Select the dataset with the modifications", filters = svDialogs::dlg_filters[c('All'), ])$res->data
+  
+  # Import the selected data and convert it into a data frame
+  toclassify.temp<-as.data.frame(import_data(data))
+}
+
+  # Convert the adjusted data to H2O format and exclude the first column
+    toclassify_pred.temp <- as.h2o(toclassify.temp[, c(-1)],destination_frame = "toclassify_decay")
+    # Predict using the H2O model with all MST markers
+    toclassify_pred.temp <- h2o.predict(trained.model, toclassify_pred.temp)
+    # Convert the predictions to a data frame
+    as.data.frame(toclassify_pred.temp) -> toclassify_pred.temp
+    # Combine the original IDs with the predictions
+    cbind(toclassify[, 1], toclassify_pred.temp) -> df_pred.temp
+    # Rename the columns of the combined data frame
+    names(df_pred.temp) <- c('ID', names(toclassify_pred))
+  
+# Display a message dialog explaining the preference for preserving the data derived from the data modified by the t90s
+svDialogs::dlg_message('The subsequent query pertains to the preference for saving the classifications with natural decay in a file. To proceed, please press the "Enter" key or click the "OK" button.')$res
+
+ repeat {
+    svDialogs::dlgInput('Please indicate whether you wish to save the file in the Excel (1), Calc (2), CSV (3), Stata (4) or SPSS (5) spreadsheet format (1 to 5).', password = TRUE)$res->doyouwant
+    if (doyouwant %in% c('1','2','3','4','5')) {
+      break
+    } else {
+      svDialogs::dlg_message('Please enter a valid response. To continue, please press the "Enter" key or click the "OK" button.')$res
+    }
+  }  
+  
+ # Save the data in the selected format and display a confirmation message
+  if (doyouwant=='1' ){
+    file_path <- 'Classification with natural decay.xlsx'
+    save_data(df_pred.temp, file_path)
+    svDialogs::dlg_message('The data file has been generated with the name: "Classification with natural decay.xlsx". To continue, please press the "Enter" key or click the "OK" button.')$res
+  }
+  
+  if (doyouwant=='2' ){
+    file_path <- 'Classification with natural decay.ods'
+    save_data(df_pred.temp, file_path)
+    svDialogs::dlg_message('The data file has been generated with the name:"Classification with natural decay.ods". To continue, please press the "Enter" key or click the "OK" button.')$res
+  }
+  
+  if (doyouwant=='3' ){
+    file_path <- 'Classification with natural decay.csv'
+    save_data(df_pred.temp, file_path)
+    svDialogs::dlg_message('The data file has been generated with the name: "Classification with natural decay.csv". To continue, please press the "Enter" key or click the "OK" button.')$res
+  }  
+  
+  if (doyouwant=='4' ){
+    file_path <- 'Classification with natural decay.dta'
+    save_data(df_pred.temp, file_path)
+    svDialogs::dlg_message('The data file has been generated with the name: "Classification with natural decay.dta". To continue, please press the "Enter" key or click the "OK" button.')$res
+  }    
+  
+  if (doyouwant=='5' ){
+    file_path <- 'Classification with natural decay.sav'
+    save_data(df_pred.temp, file_path)
+    svDialogs::dlg_message('The data file has been generated with the name: "Classification with natural decay.sav". To continue, please press the "Enter" key or click the "OK" button.')$res
+  }
+}    
+```
+
+

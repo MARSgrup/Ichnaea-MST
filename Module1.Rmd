@@ -1,0 +1,3011 @@
+---
+title: 'Ichnaea-MST. R notebook. Module I: training and classification module'
+author: 'Javier Méndez Viera, Antonio Monleón Getino, Alejandro Rodríguez Mena, Anicet Ramon Blach Gisbert'
+date: 
+---
+
+```{=html}
+<style>
+body {text-align: justify}
+</style>
+```
+
+# Program version and list of changes
+Version: 1.0.14
+
+
+
+# Welcome message
+Ichnaea-MST is a set of R scripts designed for training and classification using the H2O machine learning framework, specifically H2O AutoML. This tool automates model creation and tuning, allowing users to train multiple models and select the best one without manual intervention. It also handles data preprocessing, such as scaling, centering, and encoding categorical variables. Developed for novice users, Ichnaea-MST aims to help the microbiology community explore machine learning in Microbial Source Tracking (MST) scenarios. Users can access the software locally via an R Notebook or remotely through a web-based GUI under a Shiny application.
+
+```{r}
+# Show a dialogue box with a welcome message 
+svDialogs::dlg_message('Welcome to the "Ichnaea-MST training and classification module." This module trains a self-learning model using H2O AutoML, which can be saved for future use. The trained model can classify samples and reduce MST parameters, and it includes a function to simulate sample decay. Check the help tutorials before using the module. If you have a trained model, use the "Ichnaea-MST UPLOAD AND CLASSIFICATION MODULE." To start, press "Enter" or click "OK".')$res
+```
+
+
+
+# Some libraries and functions that are used to open and save data in various formats, launch spreadsheet applications and determine divergence and detect values under LOD.
+This section includes the functions for data file manipulation, the DataExplorer library for creating descriptive statistics, the function to launch a spreadsheet application (Excel o LibreOffice Calc) and a function to determine the Jensen-Shannon divergence between the training sets and the classification sets.
+
+The Jensen-Shannon Divergence (JSD) is a statistical measure that quantifies the similarity between two probability distribution, which is characterised by its symmetry and the fact that it always yields a finite value between 0 and 1. A Jensen-Shannon Divergence (JSD) value of 0.0 indicates that the distributions are identical, meaning there is no difference between the datasets. It is evident from the data that values between 0.0 and 0.2 indicate highly similar distributions, thus suggesting that the model is likely to demonstrate effective generalisation. When the JSD falls between 0.2 and 0.4, it reflects moderate differences, which may introduce slight bias in classification. A range of 0.4 to 0.6 indicates significant disparities, suggesting that the model may be influenced by distributional shifts. Finally, a JSD value greater than 0.6 indicates markedly divergent distributions, suggesting that the model may encounter difficulties with generalisation due to substantial disparities between the training and classification data. 
+
+This renders JSD particularly advantageous in machine learning and data analysis for the detection of distribution shifts, such as when comparing training and prediction datasets to evaluate potential model bias or generalisation issues.
+
+
+```{r message=FALSE, warning=FALSE}
+# Load necessary libraries
+library(readr)       # To read and write CSV files
+library(readxl)      # To read Excel files (xlsx)
+library(writexl)     # To write Excel files (xlsx)
+library(data.table)  # For fast data reading and writing
+library(readODS)     # To read ODS files
+library(haven)       # To read and write SPSS, Stata, and SAS files
+library(foreign)     # To handle external statistical data formats
+library(DataExplorer) # For quick data exploration and visualization
+
+# Function to import data from various file formats
+import_data <- function(file_path) {
+  # Get the file extension
+  file_extension <- tools::file_ext(file_path)
+  
+  # Select the appropriate reading method based on the file extension
+  switch(file_extension, 
+         csv = read_csv(file_path),     # Read CSV files
+         xlsx = read_excel(file_path),  # Read Excel files
+         txt = fread(file_path),        # Read text files
+         ods = read_ods(file_path),     # Read ODS files
+         dta = read_dta(file_path),     # Read Stata files
+         sav = read_sav(file_path),     # Read SPSS files
+         stop('Unsupported file format') # Throw an error if the format is unsupported
+  )
+}
+
+# Function to save data to various file formats
+save_data <- function(data, file_path) {
+  # Get the file extension
+  file_extension <- tools::file_ext(file_path)
+  
+  # Select the appropriate writing method based on the file extension
+  switch(file_extension, 
+         csv = fwrite(data, file_path),              # Write CSV files
+         xlsx = write_xlsx(data, file_path),         # Write Excel files
+         txt = fwrite(data, file_path, sep = "\t"),  # Write text files with tab delimiters
+         ods = write_ods(data, file_path),           # Write ODS files
+         dta = write_dta(data, file_path),           # Write Stata files
+         sav = write_sav(data, file_path),           # Write SPSS files
+         stop("Unsupported file format")             # Throw an error if the format is unsupported
+  )
+}
+
+# Try to launch the default application to open the spreadsheet containing data
+launch_spreadsheet <- function() {
+  # File selection dialog
+  filename <- svDialogs::dlg_open(
+    title = "Select the spreadsheet file to open",
+    filters = svDialogs::dlg_filters[c('All'), ]
+  )$res
+
+  if (is.null(filename) || filename == "") {
+    cat("No file selected. Operation cancelled.\n")
+    return(invisible())
+  }
+
+  # Normalize path
+  filename <- normalizePath(filename, winslash = "\\", mustWork = FALSE)
+
+  # Warn if file is in OneDrive
+  if (grepl("OneDrive", filename, ignore.case = TRUE)) {
+    warning("⚠️ The file is located in a OneDrive folder. This may cause issues When is opened.")
+  }
+
+  # Remove LibreOffice lock file if it exists
+  lock_file <- file.path(dirname(filename), paste0(".~lock.", basename(filename), "#"))
+  if (file.exists(lock_file)) {
+    message("Removing existing lock file...")
+    file.remove(lock_file)
+  }
+
+  # Detect OS and define LibreOffice Calc path
+  os_type <- Sys.info()[["sysname"]]
+  libreoffice_cmd <- NULL
+
+  if (os_type == "Windows") {
+    possible_paths <- c(
+      "C:\\Program Files\\LibreOffice\\program\\scalc.exe",
+      "C:\\Program Files (x86)\\LibreOffice\\program\\scalc.exe"
+    )
+    for (path in possible_paths) {
+      if (file.exists(path)) {
+        libreoffice_cmd <- path
+        break
+      }
+    }
+
+    if (!is.null(libreoffice_cmd)) {
+      cmd <- paste("start", shQuote(libreoffice_cmd), shQuote(filename))
+      shell(cmd, wait = TRUE)
+      cat("✅ LLibreOffice Calc or Excel is launched successfully.\n")
+    } else {
+      warning("🛑 LibreOffice Calc not found in standard locations.")
+    }
+
+  } else if (os_type == "Linux") {
+    Sys.setenv(LD_LIBRARY_PATH = "/usr/lib/libreoffice/program")
+    libreoffice_cmd <- "libreoffice"
+    result <- system2(command = libreoffice_cmd, args = c("--calc", shQuote(filename)), wait = FALSE)
+    if (result == 0) {
+      cat("✅ LLibreOffice Calc or Excel is launched successfully.\n")
+    } else {
+      warning("⚠️ Failed to launch LibreOffice Calc.")
+    }
+
+  } else if (os_type == "Darwin") {  # macOS
+    libreoffice_cmd <- "/Applications/LibreOffice.app/Contents/MacOS/soffice"
+    result <- system2(command = libreoffice_cmd, args = c("--calc", shQuote(filename)), wait = FALSE)
+    if (result == 0) {
+      cat("✅ LLibreOffice Calc or Excel is launched successfully.\n")
+    } else {
+      warning("⚠️ Failed to launch LibreOffice Calc.")
+    }
+
+  } else {
+    warning("🛑 Unsupported operating system.")
+  }
+
+  return(invisible())
+}
+
+# launch_spreadsheet() <- to a window to select the file & to open it in Calc
+
+# Divergence function (JSD+TVD)
+# Load required library
+library(philentropy)
+
+# Normalize a vector to a probability distribution
+normalize <- function(x) {
+  x <- x[!is.na(x)]
+  freq <- table(x)
+  prob <- freq / sum(freq)
+  return(prob)
+}
+
+# Jensen-Shannon Divergence
+calculate_jsd <- function(p, q) {
+  all_vals <- union(names(p), names(q))
+  p_full <- rep(0, length(all_vals))
+  q_full <- rep(0, length(all_vals))
+  names(p_full) <- all_vals
+  names(q_full) <- all_vals
+  p_full[names(p)] <- p
+  q_full[names(q)] <- q
+  mat <- rbind(p_full, q_full)
+  tryCatch({
+    as.numeric(distance(mat, method = "jensen-shannon"))
+  }, error = function(e) NA)
+}
+
+# Total Variation Distance
+calculate_tv <- function(p, q) {
+  all_vals <- union(names(p), names(q))
+  p_full <- rep(0, length(all_vals))
+  q_full <- rep(0, length(all_vals))
+  names(p_full) <- all_vals
+  names(q_full) <- all_vals
+  p_full[names(p)] <- p
+  q_full[names(q)] <- q
+  sum(abs(p_full - q_full)) / 2
+}
+
+# Interpretation functions
+interpret_jsd <- function(jsd) {
+  if (is.na(jsd)) "Not computable"
+  else if (jsd == 0) "Identical"
+  else if (jsd <= 0.2) "Very similar"
+  else if (jsd <= 0.4) "Moderate difference"
+  else if (jsd <= 0.6) "Notable difference"
+  else "Very different"
+}
+
+interpret_tv <- function(tv) {
+  if (is.na(tv)) "Not computable"
+  else if (tv < 0.1) "Very similar"
+  else if (tv < 0.3) "Moderate difference"
+  else if (tv < 0.5) "Notable difference"
+  else "Very different"
+}
+
+# Overall interpretation based on average score
+overall_interpretation <- function(jsd_int, tv_int) {
+  interpretations <- c(jsd_int, tv_int)
+  score_map <- c(
+    "Identical" = 0,
+    "Very similar" = 1,
+    "Moderate difference" = 2,
+    "Notable difference" = 3,
+    "Very different" = 4,
+    "Not computable" = NA
+  )
+  scores <- score_map[interpretations]
+  avg_score <- mean(as.numeric(scores), na.rm = TRUE)
+  
+  if (is.na(avg_score)) {
+    return("Not computable")
+  } else if (avg_score <= 1) {
+    return("Very similar")
+  } else if (avg_score <= 2) {
+    return("Moderate difference")
+  } else if (avg_score <= 3) {
+    return("Notable difference")
+  } else {
+    return("Very different")
+  }
+}
+
+# Main function to compare all predictors
+compare_distributions <- function(train_data, classify_data) {
+  common_vars <- intersect(colnames(train_data), colnames(classify_data))
+  train_data <- train_data[, common_vars, drop = FALSE]
+  classify_data <- classify_data[, common_vars, drop = FALSE]
+  
+  results <- data.frame(
+    Predictor = character(),
+    JSD = numeric(),
+    JSD_Interpretation = character(),
+    TVD = numeric(),
+    TVD_Interpretation = character(),
+    Overall_Interpretation = character(),
+    stringsAsFactors = FALSE
+  )
+  
+  for (predictor in common_vars) {
+    p <- normalize(train_data[[predictor]])
+    q <- normalize(classify_data[[predictor]])
+    
+    jsd <- calculate_jsd(p, q)
+    tv <- calculate_tv(p, q)
+    
+    jsd_int <- interpret_jsd(jsd)
+    tv_int <- interpret_tv(tv)
+    overall <- overall_interpretation(jsd_int, tv_int)
+    
+    results <- rbind(results, data.frame(
+      Predictor = predictor,
+      JSD = jsd,
+      JSD_Interpretation = jsd_int,
+      TVD = tv,
+      TVD_Interpretation = tv_int,
+      Overall_Interpretation = overall,
+      stringsAsFactors = FALSE
+    ))
+  }
+
+  # Add overall summary row
+  avg_jsd <- mean(results$JSD, na.rm = TRUE)
+  avg_tv <- mean(results$TVD, na.rm = TRUE)
+  avg_jsd_int <- interpret_jsd(avg_jsd)
+  avg_tv_int <- interpret_tv(avg_tv)
+  avg_overall <- overall_interpretation(avg_jsd_int, avg_tv_int)
+
+  summary_row <- data.frame(
+    Predictor = "OVERALL",
+    JSD = avg_jsd,
+    JSD_Interpretation = avg_jsd_int,
+    TVD = avg_tv,
+    TVD_Interpretation = avg_tv_int,
+    Overall_Interpretation = avg_overall,
+    stringsAsFactors = FALSE
+  )
+
+  results <- rbind(results, summary_row)
+  return(results)
+}
+
+LOD_detection <- function(thresholds_df, classify) {
+  # Step 1: Find common variables
+  common_vars <- intersect(colnames(thresholds_df), colnames(classify))
+  
+  # Step 2: Ensure numeric comparison
+  classify_numeric <- as.data.frame(lapply(classify[common_vars], as.numeric))
+  thresholds_numeric <- as.numeric(thresholds_df[1, common_vars])
+  
+  # Step 3: Check values below threshold
+  below_threshold <- mapply(function(col, threshold) {
+    col < threshold
+  }, classify_numeric, thresholds_numeric, SIMPLIFY = FALSE)
+  
+  below_threshold_df <- as.data.frame(below_threshold)
+  
+  # Step 4: Calculate percentage of TRUEs (below threshold)
+  percent_true_per_row <- rowMeans(below_threshold_df, na.rm = TRUE) * 100
+  
+  # Step 5: Calculate percentage of zeros
+  percent_zeros_df <- as.data.frame(lapply(classify_numeric, function(col) col == 0))
+  percent_zeros_per_row <- rowMeans(percent_zeros_df, na.rm = TRUE) * 100
+  
+  # Step 6: Return result with sample ID (assumed to be in first column of classify)
+  result <- data.frame(
+    ID = classify[[1]],
+    LOD = percent_true_per_row,
+    Zeros = percent_zeros_per_row
+  )
+  
+  return(result)
+}
+```
+
+
+
+
+# Choose the files with the data. Decide on the path for the dilution simulation. Collect the descriptive statistics.
+## Selection of the training file
+
+The user is prompted to select the training data file, ensuring the dataset is properly structured:
+
+- **Column headings** should indicate variable names, with the class in the first column.
+- **Row 1**: Quantitative (1) or qualitative (0) variable.
+- **Row 2**: Detection limit (cfus, pfps, gcs, etc.).
+- **Row 3**: MST marker (1) or not (0).
+
+
+| Class    | Parameter 1 | Parameter 2 | Parameter 3 |
+|----------|-------------|-------------|-------------|
+|          | 1           | 1           | 0           |
+|          | 95          | 19          | 0.001       |
+|          | 1           | 1           | 0           |
+| HUMAN    | 101         | 2523        | 1           |
+| POULTRY  | 17090       | 125         | 0           |
+| BOVINE   | 254         | 242         | 0           |
+| PORCINE  | 327         | 0           | 0           |
+
+For more details, refer to the help section.
+
+```{r message=FALSE, warning=FALSE}
+# Display indicating that the module start now
+svDialogs::dlg_message('Select the files with the sample dataset for training (samples with MST markers based on contamination origin) and ensure the dataset is properly structured. Decide how to simulate the dilution of these samples. Then, choose the file with the data of samples to be classified and indicate if you want to consider natural decay. To proceed, press "Enter" or click "OK".')$res
+
+# Display a message dialog prompting the user to indicate the file containing the training data
+svDialogs::dlg_message('Please indicate the file that contains the data to be employed in the training process. To proceed, press "Enter" or click "OK".')$res
+
+# Open a file dialog for the user to select the dataset for training, allowing all file types
+svDialogs::dlg_open(title = "Select the dataset for the training", filters = svDialogs::dlg_filters[c('All'), ])$res->data
+
+# Import the selected data and convert it into a data frame
+data<-as.data.frame(import_data(data))
+```
+
+
+
+### Embebed Metadata of the training file
+The class, parameter type, detection limit, and ML predictor (ML_Predictor) status are extracted to simulate the training data dilution correctly.
+
+```{r message=FALSE, warning=FALSE}
+# Extract the first three rows and all columns except the first from 'data', and assign to 'metadata'
+data[c(1, 2, 3),]->metadata_file
+data[c(1, 2, 3), -1]->metadata
+
+# Remove row names from 'data'
+row.names(data)<-NULL
+
+# Identify column names in 'metadata' where the first row contains the value 1, and assign to 'quantitatives'
+quantitatives<-names(metadata[, grep(1, metadata[1, ])])
+
+# Identify column names in 'metadata' where the first row contains the value 0, and assign to 'qualitatives'
+qualitatives<-names(metadata[, grep(0, metadata[1, ])])
+```
+
+
+
+#### Print the structure of the dataset for the training and save it as an image in a png file
+This section displays the data structure, including the parameter name, type (qualitative or quantitative), detection limit, and whether it will be used as a predictor. For easier understanding, the configuration is saved as a PNG file.
+
+```{r message=FALSE, warning=FALSE}
+# Display a message dialog prompting the user to indicate the file containing the training data
+svDialogs::dlg_message('Please verify that the table wich is going to be display contains the correct structure . To continue, press "Enter" or click "OK".')$res
+
+# Convert metadata to a transposed data frame and rename columns
+# Transponer el dataframe
+t.metadata <- as.data.frame(t(metadata))
+
+# Agregar los nombres de las columnas originales como una nueva columna
+t.metadata$ColumnNames <- rownames(t.metadata)
+rownames(t.metadata) <- NULL
+
+# Reordenar las columnas para colocar la nueva columna primero
+t.metadata <- t.metadata[, c(ncol(t.metadata), 1:(ncol(t.metadata)-1))]
+
+# Mostrar el dataframe transpuesto
+names(t.metadata) <- c('Parameter', 'Type', 'Det. Lim.', 'ML_Predictor' )
+
+# Convert columns to character type and revalue them
+t.metadata$Type <- plyr::revalue(as.character(t.metadata$Type), c('1'='Quantitative', '0'='Qualitative'))
+t.metadata$ML_Predictor <- plyr::revalue(as.character(t.metadata$ML_Predictor), c('1'='Yes', '0'='No'))
+
+# Print the modified metadata
+print(t.metadata)
+# Crear una tabla con ggplot2
+gridExtra::tableGrob(t.metadata)->imagen
+
+# Guardar la tabla como imagen
+ggplot2::ggsave("Structure of training file.png", plot = imagen, width = 8, height = 10)
+```
+
+
+
+## Selection of subrutine for dilutions 
+MST parameters are usually found in highly contaminated stool or water samples, like those from abattoir sewage or urban wastewater treatment plants. However, it's sometimes necessary to identify contamination sources in samples with fewer MST parameters. Simulating a dilution process can help improve classification accuracy in machine learning training, especially when direct measurement is difficult due to low concentrations or interference.
+
+Ichnaea-MST uses two Monte Carlo simulation methods for this. The first method simulates the relationship between the presence of a parameter in the contamination source and a similar matrix that needs classification. The second method simulates various dilution levels, from none to the maximum specified by the user, to understand how dilution affects MST parameter detection and classification. This helps create robust machine learning models that can accurately predict contamination sources even in complex conditions.
+
+```{r message=FALSE, warning=FALSE}
+# Display a message dialog explaining the simulation of a dilution process for increasing sample numbers for machine classification
+svDialogs::dlg_message('To simulate a dilution process to increase the number of samples for machine classification, select your desired settings carefully, as this choice cannot be changed later. To proceed, press "Enter" or click "OK".')$res
+
+repeat {
+  # Display an input dialog asking if a file containing the occurrence of a "parameter model" is available
+svDialogs::dlgInput('Please indicate whether you have data corresponding to the presence or occurrence of a marker that can be used to estimate dilution. Please note that two occurrences are required: the source of the contamination and the target matrix. If not, a random dilution simulation will be performed. Could you please confirm whether the file is available in a compatible format (y/n)?', password = TRUE)$res->doyouwant
+  
+ # Check if the user input is valid (either 'y', 'Y', 'n', or 'N')
+  if (doyouwant %in% c('y', 'Y', 'n', 'N')) {
+    break
+  } else {
+    # Prompt the user to enter a valid response if the input is invalid
+    svDialogs::dlg_message('Please enter a valid response. To continue, please press the "Enter" key or click the "OK" button.')$res
+  }
+}
+
+
+# Set manual.dilution to 'n' if the user indicates the file is available
+selected.dilution.fold<-0
+if (tolower(doyouwant) == 'y'){manual.dilution='n'}
+if (tolower(doyouwant) == 'n'){manual.dilution='y'}
+
+# If the user indicates the file is not available, proceed with the following steps
+if (tolower(doyouwant) != 'y'){
+    # Display a message dialog explaining the importance of understanding MST parameter dilution during data augmentation
+  svDialogs::dlg_message('When augmenting data, it is crucial to understand how much the MST parameters are diluted within the designated matrix. Excessive dilution is not recommended. To proceed, press "Enter" or click "OK".')$res  
+
+  # Display a message dialog requesting the estimation of the maximum dilution fold for MST markers
+  svDialogs::dlg_message('Please enter the maximum dilution fold for the MST markers in the target matrix as an integer, without periods or commas. If your training data are in logarithmic values, express the dilution rate as a logarithm. The program will use the provided maximum dilution rate without knowing if your values are logarithmic. For example, 3 logs of dilution equal 10000. In southern European surface waters, a maximum dilution of 10000 to 15000 allows MST parameter classification. To proceed, press "Enter" or click "OK".')$res      
+
+  # Repeat the process of asking for the dilution fold until the user confirms their selection
+  repeat {
+    user_input <- svDialogs::dlgInput('Indicate the dilution maximun dilution fold', password = TRUE)$res
+        # Validate the input
+    if (!is.na(as.numeric(user_input)) && as.numeric(user_input)>0 ) {
+      dilution.fold <- as.numeric(user_input)
+      svDialogs::dlg_message(paste('Your maximum dilution value is: ', dilution.fold, '. To continue, please press the "Enter" key or click the "OK" button.'))$res 
+      selected.dilution.fold<-1
+      break
+    } else {svDialogs::dlg_message('That is an invalid value. Please enter a valid value')$res}
+  }
+  
+}
+
+# If the user did not confirm the manual dilution, proceed with the following steps
+if (tolower(manual.dilution) != 'y') {
+  # Display a message dialog prompting the user to indicate the file containing the marker data for augmentation
+  svDialogs::dlg_message('Please select the file containing the data with the occurrences that will be used in the augmentation process. To proceed, press "Enter" or click "OK".')$res
+  
+  # Open a file dialog for the user to select the dataset for the dilution simulation, allowing all file types
+  svDialogs::dlg_open(title = "Select the dataset for the dilution simulation", filters = svDialogs::dlg_filters[c('All'), ])$res->todilute
+  
+  # Import the selected data and convert it into a data frame
+  todilute<-as.data.frame(import_data(todilute))
+}
+```
+
+
+
+## Selection of the file containing data to be classified
+Please select the file containing the data to be classified. Although H2O AutoML can classify data without an MST parameter, it's recommended to include all parameters used in the training. Ensure the dataset is properly structured.
+
+```{r message=FALSE, warning=FALSE}
+# Display a message dialog prompting the user to select the file containing the data to be classified
+svDialogs::dlg_message('Please select the file containing the data to be classified. To proceed, press "Enter" or click "OK".')$res
+
+# Open a file dialog for the user to select the dataset to be classified, allowing all file types
+svDialogs::dlg_open(title = "Select the dataset to be classified", filters = svDialogs::dlg_filters[c('All'), ])$res->toclassify
+
+# Import the selected data and convert it into a data frame
+toclassify<-as.data.frame(import_data(toclassify))
+
+# Displays the samples which are under the LOD
+LOD_detection(metadata[2, metadata[3, ] == 1],toclassify)->lod_zeros
+
+svDialogs::dlg_message(paste('The training dataset contains', length(which(metadata[3, ] == 1)), 
+    'MST markers. The next step is to verify which samples of the classification has a 100% of MST markers have values below the limit of detection (LOD) or they are zero. If any of these events occur, a pop-up window will appear indicating which samples are affected. The training and classification process can carry on, but bear in mind that these types of samples have a high risk to be put into the wrong class.', collapse = ", "))$res
+
+if (length(lod_zeros$LOD)!=0){
+# Display a message dialog requesting the estimation of the maximum dilution fold for MST markers
+svDialogs::dlg_message(paste('The following samples are at RISK OF MISCLASSIFICATION due to containing all of the MST markers below their LOD.',paste(lod_zeros$ID[lod_zeros$LOD == 100], collapse = ", ")))$res}
+
+if (length(lod_zeros$Zeros)!=0){
+# Display a message dialog requesting the estimation of the maximum dilution fold for MST markers
+svDialogs::dlg_message(paste('The following samples are at VERY HIGH RISK OF MISCLASSIFICATION. It is strongly recommended to critically evaluate whether these samples should be included in the analysis because all of their MST markers have a value of zero.',paste(lod_zeros$ID[lod_zeros$Zeros == 100], collapse = ", ")))$res}
+
+if (length(lod_zeros$LOD)!=0 | length(lod_zeros$Zeros)!=0 ){
+# To save the table showing the samples < LOD or Zero
+repeat {
+  svDialogs::dlgInput('Please indicate whether you wish to save the percentages of MST variables with values less than LOD or zeros in a spreadsheet (y/n)?', password = TRUE)$res->doyouwant
+  if (doyouwant %in% c('y', 'Y', 'n', 'N')) {
+    break
+  } else {
+    svDialogs::dlg_message('Please enter a valid response. To continue, please press the "Enter" key or click the "OK" button.')$res
+  }
+}
+
+# If the user indicates that the data should be saved, proceed with the following steps
+if (tolower(doyouwant) == 'y'){
+  repeat {
+    svDialogs::dlgInput('Please indicate whether you wish to save the file in the Excel (1), Calc (2), CSV (3), Stata (4) or SPSS (5) spreadsheet format (1 to 5).', password = TRUE)$res->doyouwant
+    if (doyouwant %in% c('1', '2', '3', '4', '5')) {
+      break
+    } else {
+      svDialogs::dlg_message('Please enter a valid response. To continue, please press the "Enter" key or click the "OK" button.')$res
+    }
+  }  
+  
+  # Save the data in the selected format and display a confirmation message
+  if (doyouwant=='1' ){
+    file_path <- 'LOD_Zero_table.xlsx'
+    save_data(lod_zeros, file_path)
+    svDialogs::dlg_message('The data file has been generated with the name LOD_Zero_table.xlsx. To continue, please press the "Enter" key or click the "OK" button.')$res
+  }
+  
+  if (doyouwant=='2' ){
+    file_path <- 'LOD_Zero_table.ods'
+    save_data(lod_zeros, file_path)
+    svDialogs::dlg_message('The data file has been generated with the name LOD_Zero_table.ods. To continue, please press the "Enter" key or click the "OK" button.')$res
+  }
+  
+  if (doyouwant=='3' ){
+    file_path <- 'LOD_Zero_table.csv'
+    save_data(lod_zeros, file_path)
+    svDialogs::dlg_message('The data file has been generated with the name LOD_Zero_table.csv. To continue, please press the "Enter" key or click the "OK" button.')$res
+  }  
+  
+  if (doyouwant=='4' ){
+    file_path <- 'LOD_Zero_table.dta'
+    save_data(lod_zeros, file_path)
+    svDialogs::dlg_message('The data file has been generated with the name LOD_Zero_table.dta. To continue, please press the "Enter" key or click the "OK" button.')$res
+  }    
+  
+  if (doyouwant=='5' ){
+    file_path <- 'LOD_Zero_table.sav'
+    save_data(lod_zeros, file_path)
+    svDialogs::dlg_message('The data file has been generated with the name LOD_Zero_table.sav. To continue, please press the "Enter" key or click the "OK" button.')$res
+  }
+}
+}
+```
+
+
+
+### In the event that a t90 amendment is employed for the purpose of modifying classification
+Please select the file containing the dataset with natural decays, specifically the t90 values. The t90 represents the time needed for a 1 log (90%) decay of the initial occurrence. Next, indicate the time of persistence you wish to simulate, using the same units as the t90 values. This helps model the decay behavior of MST markers accurately. The entered time is taken as the residence time, modifying the classification dataset values based on natural decay rates. This adjustment ensures the dataset reflects the extended duration of parameter persistence. Note that some decays are temperature-dependent, and different t90 values for the same MST marker may be reported in the literature.
+
+```{r message=FALSE, warning=FALSE}
+# Display a message dialog explaining the prompt for indicating the availability of a file for t90-based decays, if not a manual dilution will be set
+svDialogs::dlg_message('Next, you will be asked if a file is available for applying t90-based decays, which are currently limited to quantitative markers. To proceed, press "Enter" or click "OK".')$res
+
+# Repeat the process of asking for the availability of the T90 file until a valid response is provided
+repeat {
+  svDialogs::dlgInput('Please confirm whether a file containing the t90 of the MST-markers used in the training is available (y/n).', password = TRUE)$res->t90_amendment
+  if (t90_amendment %in% c('y', 'Y', 'n', 'N')) {
+    break
+  } else {
+    svDialogs::dlg_message('Please enter a valid response. To continue, please press the "Enter" key or click the "OK" button.')$res
+  }
+}
+
+# If the user indicates the t90 file is available, proceed with the following steps
+if (tolower(t90_amendment) == 'y') {
+  # Display a message dialog prompting the user to select the file containing the t90 data
+  svDialogs::dlg_message('Please select the file that contains the t90 data. To proceed, please press the "Enter" key or click the "OK" button.')$res
+  
+  # Open a file dialog for the user to select the dataset containing the t90 values, allowing all file types
+  svDialogs::dlg_open(title = "Select the dataset containing the t90 values", filters = svDialogs::dlg_filters[c('All'), ])$res->t90s
+  
+  # Import the selected data and convert it into a data frame
+  t90s<-as.data.frame(import_data(t90s))
+}
+```
+
+
+
+# Descriptive statistics of the training dataset
+The program uses MST markers without logarithm conversions, displaying selected parameters in the training dataset using boxplots. Elevated values of MST markers, especially microbial parameters, in contamination sources are converted to log10 for easier interpretation and comparison. Keep this in mind when interpreting the boxplots.
+
+```{r message=FALSE, warning=FALSE}
+# Display a message dialog explaining that a descriptive statistics using boxplots will be carried out
+
+svDialogs::dlg_message('The procedure will include generating a box-and-whisker plots for descriptive statistics, followed by displaying a table with the main statistics. This plot is limited to quantitative markers, and all quantitative data will be transformed to log10. To proceed, press "Enter" or click "OK".')$res
+
+
+# Remove the first three rows from 'data' and assign the remaining data to 'data_plot'
+data_plot<-data[c(-1, -2, -3), ]
+
+# Calculate the log10 ratio of SOMCPH and GA17 (implemented in shinny)
+# Ratio<-log10(data_plot$SOMCPH+10)/log10(data_plot$GA17+10)
+
+# Combine the 'Class' column with the quantitative columns from 'data_plot' and assign to 'df'
+df<-cbind(data_plot$Class, (data_plot[quantitatives]+1))
+names(df)<-c('Class', names(data_plot[quantitatives]))
+
+# Apply log10+1 transformation to the quantitative columns in 'df' and assign to 'df2'
+df2<-log10(df[, -1])
+
+# Assign the 'Class' column from 'df' to 'df2'
+# df2$Ratio<-Ratio (to be implemented in shinny)
+df2$Class<-df$Class
+
+# Generate boxplots for the quantitative columns in 'df2' grouped by 'Class' and assign to 'boxplots'
+DataExplorer::plot_boxplot(df2, by='Class', ncol=3)->boxplots
+
+# Display the boxplots
+boxplots
+
+# Save each boxplot as a JPEG file with high resolution
+for (i in seq_along(boxplots)) {
+  jpeg(filename = paste0("Boxplot data to train_", i, ".jpeg"), res=600, width = 8, height = 8, units = 'in')
+  print(boxplots[[i]])
+  dev.off()
+}
+
+# Calculate descriptive statistics for the quantitative columns in 'df2'
+round(pastecs::stat.desc(df2[, -length(df2)]), 3)
+```
+
+
+
+# Data augmentation
+This section explains the data augmentation process, which is essential for machine learning classification. Ichnaea-MST uses resampling techniques and simulated dilution to create artificial samples, enriching the dataset. Quantitative markers, assumed to follow a Poisson distribution, show greater variability after simulated dilution. Qualitative samples are directly subjected to dilution.
+
+Detection of MST markers depends on whether values are above or below detection limits for quantitative samples, or detection thresholds for qualitative samples. After resampling, samples are added to the original dataset, repeating the process as needed based on the complexity of the training dataset. The number of samples required depends on the number of MST markers and classes to be classified.
+
+This section outlines the functions for the two types of data augmentation in Ichnaea-MST.
+
+
+
+## Defined function when no dilutions markers are available
+This function uses a random dilution factor resampling technique, selecting from dilution factors between 1 (undiluted) and the maximum value specified by the user.
+
+```{r message=FALSE, warning=FALSE}
+# This part is for dilution as is indicated by the user 
+  dilution.m<-function(replicas, data, dilution.fold){
+    # Extract the first three rows and all columns except the first from 'data', and assign to 'metadata'
+    data[c(1, 2, 3), -1]->metadata
+    data<-data[c(-1, -2, -3), ]
+    row.names(data)<-NULL
+    
+    # Identify column names in 'metadata' where the first row contains the value 1, and assign to 'quantitatives'
+    quantitatives<-names(metadata[, grep(1, metadata[1, ])])
+    
+    # Identify column names in 'metadata' where the first row contains the value 0, and assign to 'qualitatives'
+    qualitatives<-names(metadata[, grep(0, metadata[1, ])])
+    
+    # Sampling and dilution
+    n.seq<-replicas
+    data2<-data
+    diluted<-1/runif(replicas, 1, as.numeric(dilution.fold))
+    dilution.fraction<-sample(diluted, 1)
+    data[, quantitatives]->df1
+    data[, qualitatives]->df2
+    data$Class->df0
+    
+    # Initialize temporary data frames for quantitative and qualitative columns
+    if (length(quantitatives)!=0){
+      matrix(nrow=1, ncol=length(quantitatives))->df1.temp
+      as.data.frame(df1.temp)->df1.temp
+      names(df1.temp)<-names(df1)
+    }
+    if (length(qualitatives)!=0){
+      matrix(nrow=1, ncol=length(qualitatives))->df2.temp
+      as.data.frame(df2.temp)->df2.temp
+      names(df2.temp)<-names(df2)
+    }
+    matrix(nrow=1, ncol=1)->df0.temp
+    as.data.frame(df0.temp)->df0.temp
+
+    
+    # Perform dilution for the specified number of replicas
+    for (i in seq(1, n.seq, 1)) {
+      if (length(quantitatives)!=0){data[, quantitatives]->df1}
+      if (length(qualitatives)!=0){data[, qualitatives]->df2}
+      data$Class->df0
+      if (length(quantitatives)!=0){row.n<-sample(nrow(df1), 1)}
+      if (length(qualitatives)!=0){row.n<-sample(nrow(df2), 1)}
+      
+      if (length(quantitatives)!=0){
+        for (t in 1:length(quantitatives)){
+          a<-rpois(1, df1[row.n, t])
+          df1.temp[1, t]<-a*dilution.fraction
+        }
+      }
+      if (length(qualitatives)!=0){
+        for (t in 1:length(qualitatives)){
+          a<-df2[row.n, t]
+          df2.temp[1, t]<-a*dilution.fraction
+        }
+      }
+      df0.temp<-df0[row.n]
+      if (length(qualitatives)==0){cbind(df0.temp, df1.temp)->data.temp}
+      if (length(quantitatives)==0){cbind(df0.temp, df2.temp)->data.temp}
+      if (length(quantitatives)!=0 & length(qualitatives)!=0) {cbind(df0.temp, df1.temp, df2.temp)->data.temp}
+      names(data.temp)<-c('Class', names(data.temp[, -1]))
+      data2 <- rbind(data2, data.temp)
+    }
+    
+    # Recodification according to detection limit
+    if (length(quantitatives)!=0){
+      data2[quantitatives]->data2.q
+      metadata[quantitatives]->metadata.q
+    }
+    if (length(qualitatives)!=0){
+      data2[qualitatives]->data2.ql
+      metadata[qualitatives]->metadata.ql
+    }
+    if (length(quantitatives)!=0){
+      for(i in 1:length(names(data2.q))){
+        data2.q[, i][data2.q[, i]<=metadata.q[2, i]]<-0
+      }
+    }
+    if (length(qualitatives)!=0){
+      for(i in 1:length(names(data2.ql))){
+        data2.ql[, i][data2.ql[, i]<=metadata.ql[2, i]]<-0
+        data2.ql[, i][data2.ql[, i]!=0]<-1
+      }
+    }
+    # Combination of the variables
+    if (length(qualitatives)==0){data3<-cbind(data2$Class, data2.q)}
+    if (length(quantitatives)==0){data3<-cbind(data2$Class, data2.ql)}
+    if (length(quantitatives)!=0 & length(qualitatives)!=0) {data3<-cbind(data2$Class, data2.q, data2.ql)}
+    names(data3)<-c('Class', names(data3[, -1]))
+    return(data3)
+  }
+```
+
+
+
+## Defined function when two dilutions markers are available
+This function uses a dilution factor obtained by resampling possible dilution ratios based on the probability densities of two markers. The user should indicate any potential discrepancies between the actual marker data in the matrix to be classified and the simulated marker values in the augmented dataset.
+
+```{r message=FALSE, warning=FALSE}
+# This part is for the dilution using the two 'dilution' markers
+  dilution<-function(replicas, todilute, data){
+    # Extract the first three rows and all columns except the first from 'data', and assign to 'metadata'
+    data[c(1, 2, 3), -1]->metadata
+    data<-data[c(-1, -2, -3), ]
+    row.names(data)<-NULL
+    
+    # Identify column names in 'metadata' where the first row contains the value 1, and assign to 'quantitatives'
+    quantitatives<-names(metadata[, grep(1, metadata[1, ])])
+    
+    # Identify column names in 'metadata' where the first row contains the value 0, and assign to 'qualitatives'
+    qualitatives<-names(metadata[, grep(0, metadata[1, ])])
+    
+    # Extract origin and target densities from 'todilute'
+    origin_d<-todilute[, grep(0, todilute[1, ])]
+    target_d<-todilute[, grep(1, todilute[1, ])]
+    
+    origin_d[-c(1, 2)]->origin_density
+    target_d[-c(1, 2)]->target_density
+    origin_d[2]->dl.origin_d
+    target_d[2]->dl.target_d
+    
+    as.data.frame(na.omit(origin_d[-c(1, 2)]))->origin_dd
+    as.data.frame(na.omit(target_d[-c(1, 2)]))->target_dd
+    names(origin_dd)<-c(names(todilute)[grep(0, todilute[1, ])])
+    names(target_dd)<-names(todilute)[grep(1, todilute[1, ])]
+    
+    # Sampling and dilution
+    n.seq<-replicas
+    data2<-data
+    
+    density(na.omit(origin_density), bw='SJ', from=min(na.omit(origin_density)), to=max(na.omit(origin_density)))->densidad_0
+    density(na.omit(target_density), bw='SJ', from=min(na.omit(target_density)), to=max(na.omit(target_density)))->densidad_1
+    
+    library(mc2d)
+    mcstoc(rempiricalD, values=densidad_0$x, prob=densidad_0$y, nsv=replicas, rtrunc=T, linf=0)->target_0
+    mcstoc(rempiricalD, values=densidad_1$x, prob=densidad_1$y, nsv=replicas, rtrunc=T, linf=0)->target_1
+    
+    diluted<-as.numeric((target_1/target_0))
+    dilution.fraction<-sample(diluted, 1)
+    
+    data[, quantitatives]->df1
+    data[, qualitatives]->df2
+    
+    # Define variables origin and target, this last will be used to validate the simulation of the dilution process
+    as.numeric(unlist(origin_dd))->origin_ddd
+    as.numeric(unlist(target_dd))->target_ddd
+    data$Class->df0
+    
+    # Initialize temporary data frames for quantitative, qualitative and target and origin variables
+    if (length(quantitatives)!=0){
+      matrix(nrow=1, ncol=length(quantitatives))->df1.temp
+      matrix(nrow=1, ncol=1)->origin_d.temp
+      matrix(nrow=1, ncol=1)->target_d.temp
+      as.data.frame(df1.temp)->df1.temp
+      as.data.frame(origin_d.temp)->origin_d.temp
+      as.data.frame(target_d.temp)->target_d.temp
+      names(df1.temp)<-names(df1)
+      names(origin_d.temp)<-names(origin_d)
+      names(target_d.temp)<-names(target_d)
+    }
+    
+    if (length(quantitatives)!=0){
+      matrix(nrow=1, ncol=length(qualitatives))->df2.temp
+      matrix(nrow=1, ncol=1)->origin_d.temp
+      matrix(nrow=1, ncol=1)->target_d.temp 
+      as.data.frame(df2.temp)->df2.temp
+      as.data.frame(origin_d.temp)->origin_d.temp
+      as.data.frame(target_d.temp)->target_d.temp
+      names(df2.temp)<-names(df2)
+      names(origin_d.temp)<-names(origin_d)
+      names(target_d.temp)<-names(target_d)
+    }
+    
+    matrix(nrow=1, ncol=1)->df0.temp
+    as.data.frame(df0.temp)->df0.temp
+    
+    # Perform dilution for the specified number of replicas
+    for (i in seq(1, n.seq, 1)) {
+      if (length(quantitatives)!=0){data[, quantitatives]->df1}
+      if (length(qualitatives)!=0){data[, qualitatives]->df2}
+      data$Class->df0
+      
+      if (length(quantitatives)!=0){
+        row.n<-sample(nrow(df1), 1)
+        row.n1<-sample(nrow(as.data.frame(origin_dd)), 1)
+        row.n2<-sample(nrow(as.data.frame(target_dd)), 1)
+      }
+      
+      if (length(qualitatives)!=0){
+        row.n<-sample(nrow(df2), 1)
+        row.n1<-sample(nrow(as.data.frame(origin_dd)), 1)
+        row.n2<-sample(nrow(as.data.frame(target_dd)), 1)
+      }
+      
+      if (length(quantitatives)!=0){
+        for (t in 1:length(quantitatives)){
+          a<-rpois(1, df1[row.n, t])
+          df1.temp[1, t]<-a*dilution.fraction
+        }
+        a1<-rpois(1, origin_dd[row.n1, ])
+        a2<-rpois(1, target_dd[row.n2, ])
+        origin_d.temp[1]<-a1*dilution.fraction
+        target_d.temp[1]<-a2*dilution.fraction
+      }
+      
+      if (length(qualitatives)!=0){
+        for (t in 1:length(qualitatives)){
+          a<-df2[row.n, t]
+          df2.temp[1, t]<-a*dilution.fraction
+        }
+        a1<-rpois(1, origin_dd[row.n1, ])
+        a2<-rpois(1, target_dd[row.n2, ])
+        origin_d.temp[1]<-a1*dilution.fraction
+        target_d.temp[1]<-a2*dilution.fraction
+      }
+      
+      df0.temp<-df0[row.n]
+      if (length(qualitatives)==0){cbind(df0.temp, df1.temp)->data.temp}
+      if (length(quantitatives)==0){cbind(df0.temp, df2.temp)->data.temp}
+      if (length(quantitatives)!=0 & length(qualitatives)!=0) {cbind(df0.temp, df1.temp, df2.temp)->data.temp}
+      names(data.temp)<-c('Class', names(data.temp[, -1]))
+      rbind(data2, data.temp)->data2
+      c(origin_ddd, as.numeric(origin_d.temp))->origin_ddd
+      c(target_ddd, as.numeric(target_d.temp))->target_ddd
+    }
+    
+    as.data.frame(origin_ddd)->origin_ddd
+    as.data.frame(target_ddd)->target_ddd
+    names(origin_ddd)<-names(origin_dd)
+    names(target_ddd)<-names(origin_dd)
+    
+    # Recodification according to detection limit
+    if (length(quantitatives)!=0){
+      data2[quantitatives]->data2.q
+      metadata[quantitatives]->metadata.q
+    }
+    if (length(qualitatives)!=0){
+      data2[qualitatives]->data2.ql
+      metadata[qualitatives]->metadata.ql
+    }
+    if (length(quantitatives)!=0){
+      for(i in 1:length(names(data2.q))){
+        data2.q[, i][data2.q[, i]<=metadata.q[2, i]]<-0
+      }
+      origin_ddd[origin_ddd<=dl.origin_d]<-0
+      target_ddd[target_ddd<=dl.target_d]<-0
+    }
+    
+    if (length(qualitatives)!=0){
+      for(i in 1:length(names(data2.ql))){
+        data2.ql[, i][data2.ql[, i]<=metadata.ql[2, i]]<-0
+        data2.ql[, i][data2.ql[, i]!=0]<-1
+      }
+      origin_ddd[origin_ddd<=dl.origin_d]<-0
+      target_ddd[target_ddd<=dl.target_d]<-0
+    }
+    
+    # Combination fo the variables 
+    if (length(qualitatives)==0){data3<-cbind(data2$Class, data2.q)}
+    if (length(quantitatives)==0){data3<-cbind(data2$Class, data2.ql)}
+    if (length(quantitatives)!=0 & length(qualitatives)!=0) {data3<-cbind(data2$Class, data2.q, data2.ql)}
+    names(data3)<-c('Class', names(data3[, -1]))
+    return(list(data3, origin_ddd, target_ddd))
+  }
+
+```
+
+
+
+# Information window about the number of classes, MST markers, number of samples and the number of replicas needed based on the power analysis for the model  
+This section calculates the number of replications needed for a study using power analysis with the pwr package. Power analysis helps determine the sample size required to detect an effect with a specified confidence level. The code uses the pwr.f2.test function to calculate the sample size needed for a statistical power of 0.9 (90%).
+
+Increasing the minimum number of replicas improves the model's accuracy and statistical power by providing more training data. However, this also increases computational demands and training time. Additionally, non-representative or noisy data can lead to overfitting. By default, the minimum number of replicas is increased by a factor of five.
+
+```{r message=FALSE, warning=FALSE}
+# Calculate the number of replicas needed based on the power analysis for the model
+replicas<-1+as.numeric(pwr::pwr.f2.test(u = length(names(metadata[, grep(1, metadata[3,])])), f2 = 0.02, sig.level = 0.05, power = 0.9)[1])+as.numeric(pwr::pwr.f2.test(u = length(names(metadata[, grep(1, metadata[3,])])), f2 = 0.02, sig.level = 0.05, power = 0.9)[2])
+round(replicas, 0)->replicas
+
+replicas.purged<-5*replicas
+
+if (tolower(manual.dilution) != 'y') {
+replicas.purged<-5*replicas+1*length((todilute[, grep(0, todilute[1, ])]))-2}
+
+# Create a message detailing the model's characteristics and the required sample size for augmentation
+paste('Your model has ', length(unique(na.omit(data$Class))), ' classes ', 'and ', length(names(metadata[, grep(1, metadata[3, ])])), ' MST-markers ', ' with ', length(na.omit(data$Class)), ' samples.', ' In consideration of the characteristics inherent to your model, a minimum sample size of ', replicas, ' samples may be appropriate.', ' Accordingly, an augmented dataset will be generated by concatenating five replicates with the minimum number. Once the simulation is complete, the expected number of samples will be about ', replicas.purged, '.', ' The 70 % of these samples ' , round(0.7*replicas.purged, 0), ' will be used for training and the remaining ', round(0.3*replicas.purged, 0), ' samples for validation. To continue, please press the "Enter" key or click the "OK" button.', sep='')->text.dialog
+
+# Display the message dialog with the generated text to show the info
+svDialogs::dlg_message(text.dialog)$res
+
+```
+
+
+
+# Dataset for data augmentation & Amendment of the augmented dataset
+In this section, the augmented dataset is generated by parallelizing the data augmentation function and launching five threads simultaneously. The original training samples are included only once in the augmented dataset.
+
+When incorporating the data of the two markers for dilution, a dialog box prompts the user for the maximum discrepancy between the dilution marker's occurrence in the target matrix and the augmented dataset. If the desired discrepancy level isn't achieved after ten attempts, the user is directed to select the maximum dilution level.
+
+```{r message=FALSE, warning=FALSE}
+
+# If manual dilution is not selected, proceed with the following steps
+if (tolower(manual.dilution) != 'y') {
+
+# Dialog box to introduce this stage  
+    svDialogs::dlg_message('Next, the simulation of contamination dilution will begin, based on empirical density (empirical probability density). This method estimates the probability distribution of a marker in the contamination origin matrix and a similar matrix to be classified, using observed data without assuming a theoretical distribution. To proceed, press "Enter" or click "OK".')$res  
+  
+# Dialog box  
+    svDialogs::dlg_message('In the next stage, you will be prompted to indicate the maximum difference between the medians of the two "dilution markers". These medians come from the dilution simulation of the marker in the contamination origin, not the real values in the target matrix. Note that closer medians require more computations. If adjustment is not feasible after 10 runs, an estimated dilution ratio will be used, and the program will continue. To proceed, press "Enter" or click "OK".')$res
+
+# Introduce the mean threshold
+  svDialogs::dlgInput('Please specify the acceptable log10 difference between the medians, a value of 0.5 would be fine. Please introduce a valid value.', password = TRUE)$res->user_input
+  
+  # Validate the input
+if (!is.na(as.numeric(user_input))) {
+  break.level <- as.numeric(user_input)
+  svDialogs::dlg_message(paste('Your threshold is: ', break.level, 'log 10. To continue, please press the "Enter" key or click the "OK" button.'))$res
+} else {
+  svDialogs::dlg_message('That is an invalid value. Please enter a valid value')$res
+  }
+  
+  # Initialise a counter
+  counter<-0
+  
+  suppressPackageStartupMessages(library(doParallel))
+  cl <- makePSOCKcluster(detectCores())
+  registerDoParallel(cl)
+  
+  repeat {
+    # Execute the foreach loop to obtain the three lists (MST data and how markers for dilution are diluted, target_dd can be omitted)
+    results <- foreach(i = 1:5, .combine = 'list', .multicombine = TRUE) %dopar% {
+      dilution(replicas, todilute, data)
+    }
+    
+    # Initialize lists to store the results
+    data_list <- list()
+    origin_dd_list <- list()
+    target_dd_list <- list()
+    
+    # Separate the results into the corresponding lists
+    for (i in 1:length(results)) {
+      data_list[[i]] <- results[[i]][[1]]
+      origin_dd_list[[i]] <- results[[i]][[2]]
+      target_dd_list[[i]] <- results[[i]][[3]]
+    }
+    
+    # Combine the results of each list
+    data3_combined <- do.call(rbind, data_list)
+    origin_dd_combined <- do.call(rbind, origin_dd_list)
+    target_dd_combined <- do.call(rbind, target_dd_list)
+    
+    data3_combined->data3
+    
+    # Function to remove repeated dataset from origin MST samples in the final data augmentation
+    rem.repats<-function(Training, Simulated){
+      length(Training[, 1])-3->longitud
+      remove<-c(seq(replicas+longitud+1, replicas+2*longitud, 1), seq(2*replicas+2*longitud+1, 2*replicas+3*longitud, 1), seq(3*replicas+3*longitud+1, 3*replicas+4*longitud, 1), seq(4*replicas+4*longitud+1, 4*replicas+5*longitud, 1))
+      return(Simulated[-remove, ])
+    }
+    rem.repats(data, data3)->data3
+    
+    real.target <- as.numeric(na.omit(unlist(todilute[grep(1, todilute[1, ])])))
+    simulated.target <- as.numeric(unlist(origin_dd_combined))
+    
+    max_length <- max(length(real.target), length(simulated.target))
+    real.target <- c(real.target, rep(NA, max_length - length(real.target)))
+    simulated.target <- c(simulated.target, rep(NA, max_length - length(simulated.target)))
+    
+    targets <- data.frame(Real = real.target, Simulated = simulated.target)
+    
+    # Break the loop if the median log10 difference is within the acceptable range (per default ± 0.5 log10)
+    
+    counter<-counter+1
+    
+    print(counter) # this line can be safely removed
+    
+    if (abs(median(log10(targets$Simulated+1)- median(na.omit(log10(targets$Real+1)))))<=break.level) {break}
+    if (counter==10) {manual.dilution='y'}
+    if (counter==10){svDialogs::dlg_message('It was impossible to obtain a valid diference after 10 runs. It will proceed with a dilution ratio. To continue, please press the "Enter" key or click the "OK" button.')$res}
+    if (counter==10) {break}
+  }
+  stopCluster(cl)
+  registerDoSEQ()
+  
+  if (tolower(manual.dilution) != 'y') {
+  # Create and save a comparison boxplot between real and simulated targets
+  par(mfrow=c(1, 2))
+  boxplot(log10(targets+1), names=c('Real', 'Simulated'), main=substitute(paste(bold('Boxplot'))), ylab=expression('Log'[10]*'(values + 1)'), col=c('lightblue', 'lightgreen'))
+
+  plot(density(na.omit(log10(targets+1)$Real)), main=substitute(paste(bold('Density plot'))), xlab=expression('Log'[10]*'(values + 1)'), col='lightblue', lwd=2, xlim=c(min(c(na.omit(log10(targets+1)$Real), log10(na.omit(simulated.target+1)))), max(c(na.omit(log10(targets+1)$Real)), log10(na.omit(simulated.target+1)))))
+  
+lines(density(log10(na.omit(simulated.target+1))), col='lightgreen', lwd=2)
+  
+  jpeg('Comparison boxplot between real and simulated.jpeg', res=600, width = 8, height = 5, units = 'in')
+  par(mfrow=c(1, 2))
+  boxplot(log10(targets+1), names=c('Real', 'Simulated'), main=substitute(paste(bold('Boxplot'))), ylab=expression('Log'[10]*'(values + 1)'), col=c('lightblue', 'lightgreen'))
+
+  plot(density(na.omit(log10(targets+1)$Real)), main=substitute(paste(bold('Density plot'))), xlab=expression('Log'[10]*'(values + 1)'), col='lightblue', lwd=2, xlim=c(min(c(na.omit(log10(targets+1)$Real), log10(na.omit(simulated.target+1)))), max(c(na.omit(log10(targets+1)$Real)), log10(na.omit(simulated.target+1)))))
+  
+lines(density(log10(na.omit(simulated.target+1))), col='lightgreen', lwd=2)
+  dev.off()
+}
+}
+
+
+# If manual dilution is selected, proceed with the following steps
+if (tolower(manual.dilution) == 'y' & selected.dilution.fold == 0) {
+
+# Display a message dialog explaining the importance of understanding MST parameter dilution during data augmentation
+  svDialogs::dlg_message('When augmenting data, it is crucial to understand how much the MST parameters are diluted within the designated matrix. Excessive dilution is not recommended. To proceed, press "Enter" or click "OK".')$res  
+
+  # Display a message dialog requesting the estimation of the maximum dilution fold for MST markers
+  svDialogs::dlg_message('Please indicate the maximum dilution fold for the MST markers in the target matrix as an integer, without periods or commas. If all training data are logarithmic values, express the dilution rate as a logarithm. Note that the program will handle the maximum dilution rate as provided, without knowing if your values are logarithmic. For example, 3 logs of dilution equal 10000. In southern European surface waters, a maximum dilution of 10000 to 15000 allows MST parameter classification. To proceed, press "Enter" or click "OK".')$res      
+
+  # Repeat the process of asking for the dilution fold until the user confirms their selection
+  repeat {
+    user_input <- svDialogs::dlgInput('Indicate the dilution maximun dilution fold', password = TRUE)$res
+        # Validate the input
+    if (!is.na(as.numeric(user_input)) && as.numeric(user_input)>0 ) {
+      dilution.fold <- as.numeric(user_input)
+      svDialogs::dlg_message(paste('Your maximum dilution value is: ', dilution.fold, '. To continue, please press the "Enter" key or click the "OK" button.'))$res 
+      break
+    } else {svDialogs::dlg_message('That is an invalid value. Please enter a valid value')$res}
+  } 
+  
+  suppressPackageStartupMessages(library(doParallel))
+  cl <- makePSOCKcluster(detectCores())
+  registerDoParallel(cl)
+  
+  data3<-foreach(i = 1:5, .combine = 'rbind') %dopar% {dilution.m(replicas, data, dilution.fold)}
+  
+  # Function to remove repeated samples
+  rem.repats<-function(Training, Simulated){
+    length(Training[, 1])-3->longitud
+    remove<-c(seq(replicas+longitud+1, replicas+2*longitud, 1), seq(2*replicas+2*longitud+1, 2*replicas+3*longitud, 1), seq(3*replicas+3*longitud+1, 3*replicas+4*longitud, 1), seq(4*replicas+4*longitud+1, 4*replicas+5*longitud, 1))
+    return(Simulated[-remove, ])
+  }
+  rem.repats(data, data3)->data3
+  
+  stopCluster(cl)
+  registerDoSEQ()
+}
+
+# If manual dilution is selected, proceed with the following steps
+if (tolower(manual.dilution) == 'y' & selected.dilution.fold != 0) {
+
+# Display a message dialog explaining the importance of understanding MST parameter dilution during data augmentation
+  svDialogs::dlg_message(paste('The augmentation with a dilution fold of: ', dilution.fold, ' is going to start. To continue, please press the "Enter" key or click the "OK" button.'))$res 
+
+  suppressPackageStartupMessages(library(doParallel))
+  cl <- makePSOCKcluster(detectCores())
+  registerDoParallel(cl)
+  
+  data3<-foreach(i = 1:5, .combine = 'rbind') %dopar% {dilution.m(replicas, data, dilution.fold)}
+  
+  # Function to remove repeated samples
+  rem.repats<-function(Training, Simulated){
+    length(Training[, 1])-3->longitud
+    remove<-c(seq(replicas+longitud+1, replicas+2*longitud, 1), seq(2*replicas+2*longitud+1, 2*replicas+3*longitud, 1), seq(3*replicas+3*longitud+1, 3*replicas+4*longitud, 1), seq(4*replicas+4*longitud+1, 4*replicas+5*longitud, 1))
+    return(Simulated[-remove, ])
+  }
+  rem.repats(data, data3)->data3
+  
+  stopCluster(cl)
+  registerDoSEQ()
+}
+
+```
+
+
+
+# Exportation of the augmented dataset to a file
+It is proposed that some parameters for MST are relationships between two parameters, such as the ratio of log10 values between somatic coliphages and the GA17 bacteriophage of _Bacteroides thetaiotaomicron_. The R script would process this ratio as an additional parameter, but this is incorrect. To address this issue, a methodology has been formulated.
+
+This methodology involves the use of a file to store the outcomes of the data augmentation table. Furthermore, it allows the user to make any alterations they deem appropriate and subsequently incorporate them into the program.
+
+It is imperative to recreate the headers of the first three rows; however, in this instance, the detection limit value or the nature of the variable will not be considered, yet the values of the third row will be taken into account.
+
+Consider the ratio of log10 values between somatic coliphages and the GA17 bacteriophage of _B. thetaiotaomicron_. It is evident that coliphages do not serve as MST markers, given their excretion by humans and animals. Consequently, the metadata associated with this parameter could be:
+
+- **Row 1**: 1
+- **Row 2**: 10
+- **Row 3**: 0 
+
+(_quantitative variable, detection limit of 10 pfus/100mL, not a predictor in training_)
+
+For the bacteriophage of _B. thetaiotaomicron_ (very specific to humans), its metadata could be:
+
+- **Row 1**: 1
+- **Row 2**: 10
+- **Row 3**: 1
+
+(_quantitative variable, detection limit of 0 pfus/100mL, predictor in training_)
+
+For the ratio, its metadata could be:
+
+- **Row 1**: 1
+- **Row 2**: 0
+- **Row 3**: 1 
+
+(_quantitative variable, detection limit of 0, predictor in training_)
+
+
+
+```{r message=FALSE, warning=FALSE}
+# Display a message dialog explaining the preference for preserving the data derived from the data augmentation simulation
+svDialogs::dlg_message('The next query asks if you want to save the data from the augmentation simulation. This is necessary if you plan to add variables, like a ratio between different MST markers. Remember, the variables concerning to the metadata are in the first three rows and must be manually entered in the dataset. To proceed, press "Enter" or click "OK".')$res
+
+# Repeat the process of asking for confirmation until a valid response is provided
+repeat {
+  svDialogs::dlgInput('Proceed saving the data (y/n)?', password = TRUE)$res->doyouwant
+  if (doyouwant %in% c('y', 'Y', 'n', 'N')) {
+    break
+  } else {
+    svDialogs::dlg_message('Please enter a valid response. To continue, please press the "Enter" key or click the "OK" button.')$res
+  }
+}
+
+# If the user indicates that the data should be saved, proceed with the following steps
+if (tolower(doyouwant) == 'y'){
+  repeat {
+    svDialogs::dlgInput('Please indicate whether you wish to save the file in the Excel (1), Calc (2), CSV (3), Stata (4) or SPSS (5) spreadsheet format (1 to 5).', password = TRUE)$res->doyouwant
+    if (doyouwant %in% c('1', '2', '3', '4', '5')) {
+      break
+    } else {
+      svDialogs::dlg_message('Please enter a valid response. To continue, please press the "Enter" key or click the "OK" button.')$res
+    }
+  }  
+  
+  # Save the data in the selected format and display a confirmation message
+  if (doyouwant=='1' ){
+    file_path <- 'Augmented_data_set.xlsx'
+    save_data(data3, file_path)
+    svDialogs::dlg_message('The data file has been generated with the name Augmented_data_set.xlsx. To continue, please press the "Enter" key or click the "OK" button.')$res
+  }
+  
+  if (doyouwant=='2' ){
+    file_path <- 'Augmented_data_set.ods'
+    save_data(data3, file_path)
+    svDialogs::dlg_message('The data file has been generated with the name Augmented_data_set.ods. To continue, please press the "Enter" key or click the "OK" button.')$res
+  }
+  
+  if (doyouwant=='3' ){
+    file_path <- 'Augmented_data_set.csv'
+    save_data(data3, file_path)
+    svDialogs::dlg_message('The data file has been generated with the name Augmented_data_set.csv. To continue, please press the "Enter" key or click the "OK" button.')$res
+  }  
+  
+  if (doyouwant=='4' ){
+    file_path <- 'Augmented_data_set.dta'
+    save_data(data3, file_path)
+    svDialogs::dlg_message('The data file has been generated with the name Augmented_data_set.dta. To continue, please press the "Enter" key or click the "OK" button.')$res
+  }    
+  
+  if (doyouwant=='5' ){
+    file_path <- 'Augmented_data_set.sav'
+    save_data(data3, file_path)
+    svDialogs::dlg_message('The data file has been generated with the name Augmented_data_set.sav. To continue, please press the "Enter" key or click the "OK" button.')$res
+  }
+}
+
+
+```
+
+
+## If a change in the data augmentation is carried out
+In this section, the user is asked if they have modified the augmented dataset. If no modifications have been made, the script continues with the existing data. If modifications have been made, the user is prompted to load the altered file, new metadata is generated, and the process resumes with the updated data.
+
+```{r message=FALSE, warning=FALSE}
+# This is a control variable
+new.augmented<-0
+
+# Display a message dialog explaining the preference to reintroduce the augmented data simulation with changes
+svDialogs::dlg_message('The subsequent query concerns the necessity of modifying the augmented data simulation with changes. Please ensure that the data structure remains as designed for the training file, particularly with regard to the initial three rows. When utilising a CSV file, please be sure to remove the column containing the row numbers if required. To proceed, press "Enter" or click "OK".')$res
+
+
+repeat {
+# Display an input dialog asking if a file containing the modifications in the augmented data is available
+svDialogs::dlgInput('Prior to proceeding, it is necessary to indicate whether modifications to the augmented data are required or whether a file containing the changes is available. In the event that this is not the case, data classification will proceed with the previously generated augmented data set. It is requested that the user indicates whether any changes are desired. (y/n)?', password = TRUE)$res->doyouwant
+
+ # Check if the user input is valid (either 'y', 'Y', 'n', or 'N')
+  if (doyouwant %in% c('y', 'Y', 'n', 'N')) {
+    break
+  } else {
+    # Prompt the user to enter a valid response if the input is invalid
+    svDialogs::dlg_message('Please enter a valid response. To continue, please press the "Enter" key or click the "OK" button.')$res
+  }
+}
+
+
+
+# If the user indicates that the data should be modified, proceed with the following steps
+if (tolower(doyouwant) == 'y'){
+  
+repeat {  
+svDialogs::dlgInput('If you are planning to make changes to the file, would you like R to generate and save an appropriately headed file (y/n)?', password = TRUE)$res->doyouwant_mod
+# Check if the user input is valid (either 'y', 'Y', 'n', or 'N')
+  if (doyouwant_mod %in% c('y', 'Y', 'n', 'N')) {
+    break
+  } else {
+    # Prompt the user to enter a valid response if the input is invalid
+    svDialogs::dlg_message('Please enter a valid response. To continue, please press the "Enter" key or click the "OK" button.')$res
+  }
+}  
+
+  
+if (tolower(doyouwant) == 'y' && tolower(doyouwant_mod) == 'y'){
+
+  repeat {
+    svDialogs::dlgInput('Please indicate whether you wish to save the file in the Excel (1), Calc (2), CSV (3), Stata (4) or SPSS (5) spreadsheet format (1 to 5).', password = TRUE)$res->doyouwant_mod_file
+    if (doyouwant_mod_file %in% c('1', '2', '3', '4', '5')) {
+      break
+    } else {
+      svDialogs::dlg_message('Please enter a valid response. To continue, please press the "Enter" key or click the "OK" button.')$res
+    }
+  }  
+  
+  # Save the data in the selected format and display a confirmation message
+  if (doyouwant_mod_file=='1' ){
+    file_path <- 'Augmented_data_set_mod.xlsx'
+    save_data(rbind(metadata_file,data3), file_path)
+    svDialogs::dlg_message('The data file has been generated with the name Augmented_data_set_mod.xlsx. To continue, please press the "Enter" key or click the "OK" button.')$res
+  }
+  
+  if (doyouwant_mod_file=='2' ){
+    file_path <- 'Augmented_data_set_mod.ods'
+    save_data(rbind(metadata_file,data3), file_path)
+    svDialogs::dlg_message('The data file has been generated with the name Augmented_data_set_mod.ods. To continue, please press the "Enter" key or click the "OK" button.')$res
+  }
+  
+  if (doyouwant_mod_file=='3' ){
+    file_path <- 'Augmented_data_set_mod.csv'
+    save_data(rbind(metadata_file,data3), file_path)
+    svDialogs::dlg_message('The data file has been generated with the name Augmented_data_set_mod.csv. To continue, please press the "Enter" key or click the "OK" button.')$res
+  }  
+  
+  if (doyouwant_mod_file=='4' ){
+    file_path <- 'Augmented_data_set_mod.dta'
+    save_data(rbind(metadata_file,data3), file_path)
+    svDialogs::dlg_message('The data file has been generated with the name Augmented_data_set_mod.dta. To continue, please press the "Enter" key or click the "OK" button.')$res
+  }    
+  
+  if (doyouwant_mod_file=='5' ){
+    file_path <- 'Augmented_data_set_mod.sav'
+    save_data(rbind(metadata_file,data3), file_path)
+    svDialogs::dlg_message('The data file has been generated with the name Augmented_data_set_mod.sav. To continue, please press the "Enter" key or click the "OK" button.')$res
+  }
+}
+}
+
+# Display an input dialog asking if LibreOffice Calc needs to be launched
+if (tolower(doyouwant) == 'y'){
+repeat {
+svDialogs::dlgInput('LibreOffice can open files in CSV, Excel and Calc formats. If either LibreOffice Calc or Excel is installed on your computer, R will attempt to open one of these applications. Would you like R to try to open them. (y/n)?', password = TRUE)$res->doyouwant_calc
+
+ # Check if the user input is valid (either 'y', 'Y', 'n', or 'N')
+  if (doyouwant_calc %in% c('y', 'Y', 'n', 'N')) {
+    break
+  } else {
+    # Prompt the user to enter a valid response if the input is invalid
+    svDialogs::dlg_message('Please enter a valid response. To continue, please press the "Enter" key or click the "OK" button.')$res
+  }
+}
+}
+
+if (tolower(doyouwant) == 'y' && tolower(doyouwant_calc) == 'y') launch_spreadsheet()
+
+# If the user indicates the file is available, proceed with the following steps
+if (tolower(doyouwant) == 'y'){
+  # Display a message dialog prompting the user to indicate the file containing the modified augmented file
+  svDialogs::dlg_message('Please indicate the file that contains the modifications. To proceed, please press the "Enter" key or click the "OK" button.')$res
+  
+  # Open a file dialog for the user to select the dataset, allowing all file types
+  svDialogs::dlg_open(title = "Select the dataset with the modifications.", filters = svDialogs::dlg_filters[c('All'), ])$res->data
+  
+  # Import the selected data and convert it into a data frame
+  new.data<-as.data.frame(import_data(data))
+  
+  # Extract the first three rows and all columns except the first from 'data', and assign to 'metadata'
+  new.data[c(1, 2, 3), -1]->new.metadata
+  
+  # Remove row names from 'data'
+  row.names(data)<-NULL
+  
+  # Identify column names in 'metadata' where the first row contains the value 1, and assign to 'quantitatives'
+  new.quantitatives<-names(new.metadata[, grep(1, new.metadata[1, ])])
+  
+  # Identify column names in 'metadata' where the first row contains the value 0, and assign to 'qualitatives'
+  new.qualitatives<-names(new.metadata[, grep(0, new.metadata[1, ])])
+  
+  # Assign the modified data (excluding the first three rows) to 'data3'
+  new.data3<-new.data[-c(1, 2, 3), ]
+  new.augmented<-1
+ }
+```
+
+
+
+### Display the modification of the augmented dataset
+If the augmented dataset is modified, the data structure is displayed, including the parameter name, type (qualitative or quantitative), detection limit, and whether it will be used as a predictor. To aid understanding, the configuration is saved as a PNG file.
+
+```{r message=FALSE, warning=FALSE}
+if (new.augmented==1){
+# Display a message dialog prompting the user to indicate the file containing the training data
+svDialogs::dlg_message('Please verify that the modified augmented file to be displayed has the correct structure. To proceed, press "Enter" or click "OK".')$res
+
+# Convert new.metadata to a transposed data frame and rename columns
+# Transponer el dataframe
+t.new.metadata <- as.data.frame(t(new.metadata))
+
+# Agregar los nombres de las columnas originales como una nueva columna
+t.new.metadata$ColumnNames <- rownames(t.new.metadata)
+rownames(t.new.metadata) <- NULL
+
+# Reordenar las columnas para colocar la nueva columna primero
+t.new.metadata <- t.new.metadata[, c(ncol(t.new.metadata), 1:(ncol(t.new.metadata)-1))]
+
+# Mostrar el dataframe transpuesto
+names(t.new.metadata) <- c('Parameter', 'Type', 'Det. Lim.', 'ML_Predictor' )
+
+# Convert columns to character type and revalue them
+t.new.metadata$Type <- plyr::revalue(as.character(t.new.metadata$Type), c('1'='Quantitative', '0'='Qualitative'))
+t.new.metadata$ML_Predictor <- plyr::revalue(as.character(t.new.metadata$ML_Predictor), c('1'='Yes', '0'='No'))
+
+# Print the modified new.metadata
+print(t.new.metadata)
+# Crear una tabla con ggplot2
+gridExtra::tableGrob(t.new.metadata)->imagen
+
+# Guardar la tabla como imagen
+ggplot2::ggsave("Structure of the modified augmented dataset.png", plot = imagen, width = 8, height = 10)
+}
+```
+
+
+
+# Descriptive statistics of the augmented dataset and divergence with the classification dataset
+As mentioned in the 'Descriptive Statistics of the Training Dataset' section, the occurrence of selected parameters in the augmented dataset is shown in a boxplot with decimal logarithmic values of all parameters. It is important to consider this when interpreting the boxplots.
+
+
+```{r message=FALSE, warning=FALSE}
+# Dialog box
+svDialogs::dlg_message('The procedure entails the generation of a box-and-whisker plots for the purpose of descriptive statistics, subsequently accompanied by the display of a table containing a summary of the relevant statistics. In addition, the procedure affords the option to save the divergences between the augmented data set and the classification dataset that has been previously uploaded. Box-and-whisker plots are constrained to quantitative markers, which are to be transformed to log10. To proceed, press "Enter" or click "OK".')$res
+
+
+# If no modifications have taken in the augmented data (will be remove later)
+if (new.augmented!=1){
+  # Combine the 'Class' column with the quantitative columns (incremented by 1) from 'data3' and assign to 'df'
+  df<-cbind(data3$Class, (data3[quantitatives]+1))
+  names(df)<-c('Class', names(data3[quantitatives]))
+  
+  # Apply log10 transformation to the quantitative columns (incremented by 1) in 'df' and assign to 'df2'
+  df2<-log10(df[, -1])
+  
+  # Assign the 'Class' column from 'df' to 'df2'
+  # df2$Ratio<-Ratio (commented out)
+  df2$Class<-df$Class
+  
+  # Generate boxplots for the quantitative columns in 'df2' grouped by 'Class' and assign to 'boxplots'
+  DataExplorer::plot_boxplot(df2, by='Class', ncol=3)->boxplots
+  
+  # Display the boxplots
+  boxplots
+  
+  # Save each boxplot as a JPEG file with high resolution
+  for (i in seq_along(boxplots)) {
+    jpeg(filename = paste0("Boxplot augmented data_", i, ".jpeg"), res=600, width = 8, height = 8, units = 'in')
+    print(boxplots[[i]])
+    dev.off()
+  }
+  
+  # Calculate descriptive statistics for the quantitative columns in 'df2'
+  pastecs::stat.desc(df2[, -length(df2)])
+}
+
+# If a modification has taken in the augmented data (will be remove later)
+if (new.augmented==1){
+  # Combine the 'Class' column with the quantitative columns (incremented by 1) from 'new.data3' and assign to 'df'
+  df<-cbind(new.data3$Class, (new.data3[new.quantitatives]+1))
+  names(df)<-c('Class', names(new.data3[new.quantitatives]))
+  
+  # Apply log10 transformation to the quantitative columns (incremented by 1) in 'df' and assign to 'df2'
+  df2<-log10(df[, -1])
+  
+  # Assign the 'Class' column from 'df' to 'df2'
+  # df2$Ratio<-Ratio (commented out)
+  df2$Class<-df$Class
+  
+  # Generate boxplots for the quantitative columns in 'df2' grouped by 'Class' and assign to 'boxplots'
+  DataExplorer::plot_boxplot(df2, by='Class', ncol=3)->boxplots
+  
+  # Display the boxplots
+  boxplots
+  
+  # Save each boxplot as a JPEG file with high resolution
+  for (i in seq_along(boxplots)) {
+    jpeg(filename = paste0("Boxplot augmented data_", i, ".jpeg"), res=600, width = 8, height = 8, units = 'in')
+    print(boxplots[[i]])
+    dev.off()
+  }
+  
+  # Calculate descriptive statistics for the quantitative columns in 'df2'
+  round(pastecs::stat.desc(df2[, -length(df2)]),3)
+}
+
+if (new.augmented!=1){try(compare_distributions(data3,toclassify))->comparative_distributions}
+if (new.augmented==1){try(compare_distributions(new.data3,toclassify))->comparative_distributions}
+
+repeat {  
+svDialogs::dlgInput(paste('The divergence between the augmented dataset and the clasification dataset shows a: ','"' ,comparative_distributions$Overall_Interpretation[length(comparative_distributions$Overall_Interpretation)],'".',' Do you whish to save the results of divergence analysis into a suitable file (y/n)?',sep=''), password = TRUE)$res->doyouwant_dif
+# Check if the user input is valid (either 'y', 'Y', 'n', or 'N')
+  if (doyouwant_dif %in% c('y', 'Y', 'n', 'N')) {
+    break
+  } else {
+    # Prompt the user to enter a valid response if the input is invalid
+    svDialogs::dlg_message('Please enter a valid response. To continue, please press the "Enter" key or click the "OK" button.')$res
+  }
+}  
+
+  
+if (tolower(doyouwant_dif) == 'y'){
+
+  repeat {
+    svDialogs::dlgInput('Please indicate whether you wish to save the file in the Excel (1), Calc (2), CSV (3), Stata (4) or SPSS (5) spreadsheet format (1 to 5).', password = TRUE)$res->doyouwant_dif_file
+    if (doyouwant_dif_file %in% c('1', '2', '3', '4', '5')) {
+      break
+    } else {
+      svDialogs::dlg_message('Please enter a valid response. To continue, please press the "Enter" key or click the "OK" button.')$res
+    }
+  }  
+  
+  # Save the data in the selected format and display a confirmation message
+  if (doyouwant_dif_file=='1' ){
+    file_path <- 'Comparative_distributions.xlsx'
+    save_data(comparative_distributions, file_path)
+    svDialogs::dlg_message('The data file has been generated with the name Comparative_distributions.xlsx. To continue, please press the "Enter" key or click the "OK" button.')$res
+  }
+  
+  if (doyouwant_dif_file=='2' ){
+    file_path <- 'Comparative_distributions.ods'
+    save_data(comparative_distributions, file_path)
+    svDialogs::dlg_message('The data file has been generated with the name Comparative_distributions.ods. To continue, please press the "Enter" key or click the "OK" button.')$res
+  }
+  
+  if (doyouwant_dif_file=='3' ){
+    file_path <- 'Comparative_distributions.csv'
+    save_data(comparative_distributions, file_path)
+    svDialogs::dlg_message('The data file has been generated with the name comparative_distributions.csv. To continue, please press the "Enter" key or click the "OK" button.')$res
+  }  
+  
+  if (doyouwant_dif_file=='4' ){
+    file_path <- 'Comparative_distributions.dta'
+    save_data(comparative_distributions, file_path)
+    svDialogs::dlg_message('The data file has been generated with the name Comparative_distributions.dta. To continue, please press the "Enter" key or click the "OK" button.')$res
+  }    
+  
+  if (doyouwant_dif_file=='5' ){
+    file_path <- 'Comparative_distributions.sav'
+    save_data(comparative_distributions, file_path)
+    svDialogs::dlg_message('The data file has been generated with the name Comparative_distributions.sav. To continue, please press the "Enter" key or click the "OK" button.')$res
+  }
+}
+```
+
+
+
+# Machine learning
+
+Machine learning can be categorized into three types: **supervised learning**, **unsupervised learning**, and **reinforcement learning**. MST classification falls under supervised learning, as it involves training an algorithm on labeled data. This process includes categorizing contamination types into classes like human, non-human, poultry, bovine, equine, etc., or as a percentage of a specific contamination type. The first categorization is a classification problem, while the second is a regression problem.
+
+H2O AutoML uses various supervised learning algorithms for classification and regression tasks, including:
+
+- **Generalized Linear Models (GLM)**
+- **Gradient Boosting Machine (GBM)**
+- **Distributed Random Forest (DRF)**
+- **Deep Learning (Neural Networks)**
+- **eXtreme Gradient Boosting (XGBoost)**
+- **Stacked Ensembles**
+
+Each algorithm has its strengths. The training process is computationally demanding, with Deep Learning, XGBoost, and Stacked Ensembles being the most demanding, and GLM the least. Tree-based models (DRF, GBM, and XGBoost) are optimal for interpreting training outcomes. H2O AutoML trains multiple model types, automatically tuning and evaluating them to find the best model for a dataset.
+
+GBM is the default option for training due to its optimized implementation by H2O.
+
+Machine learning is a probabilistic process, meaning results can vary even with the same augmented dataset. Factors like random initialization, training and validation dataset creation, and hyperparameter tuning can influence model selection. It's crucial to consider multiple runs and evaluations to ensure robust and reliable model performance.
+
+
+
+```{r message=FALSE, warning=FALSE}
+# Display a message dialog box with information about Ichanea-MST machine learning
+svDialogs::dlg_message('Ichanea-MST offers several options
+training options with different families of machine learning algorithms. The default option is the use of GBM (https://docs.h2o.ai/h2o/latest-stable/h2o-docs/data-science/gbm.html). In addition, Ichanea-MST implements the MST-markers reduction option. Subsequently you will be asked if you want to run this optimisation (https://docs.h2o.ai/h2o/latest-stable/h2o-r/docs/reference/h2o.infogram.html). To continue, please press the "Enter" key or click the "OK" button.')$res
+```
+
+
+## Training process
+In this section, the user selects the algorithms for training and the number of models to evaluate. The augmented dataset is then split into two parts: 70% for training and 30% for validation.
+
+```{r message=FALSE, warning=FALSE}
+# Check if 'new.augmented' is set to 1. This means that an augmented dataset has been created.
+if (new.augmented==1){
+  # Assign new data to variables
+  data3 <- new.data3  
+  metadata <- new.metadata
+  quantitatives <- new.quantitatives
+  qualitatives <- new.qualitatives
+}
+
+# Suppress package startup messages
+suppressPackageStartupMessages(library(h2o))
+suppressPackageStartupMessages(library(caret))
+
+# Display a message dialog box about configuring default options for automatic machine learning
+svDialogs::dlg_message('Now we will start configuring the default options for an automatic machine learning. To proceed, please press the "Enter" key or click the "OK" button.')$res
+
+# Display a message dialog box about the computational demands of certain models
+svDialogs::dlg_message('Note that Deep Learning, eXtreme Gradient Boosting (only works under Linux) and Stacked Ensemble models are highly computer demanding.')$res
+
+# Repeat loop to get user input for model selection
+# Define available algorithms
+
+# Display input dialog
+library(svDialogs)
+
+repeat {
+  # Prompt user for input
+svDialogs::dlgInput('Please indicate your preferred algorithm(s): (1) Distributed Random Forest (DRF) and Extremely Randomised Trees (XRT); (2) Generalised Linear Model with regularisation (GLM); (3) eXtreme Gradient Boosting (XGBoost); (4 - default) Gradient Boosting Machines (GBM); (5) Deep Learning models; and (6) Stacked Ensemble models. Please select one or more algorithms (1 to 6) by entering their numbers, separated by commas or spaces.',password = TRUE)$res-> doyouwant 
+
+  # Clean and split input
+  selected <- unlist(strsplit(gsub(",", " ", doyouwant), "\\s+"))
+  selected <- selected[selected != ""]  # Remove empty strings
+
+  # Check if all inputs are valid
+  if (all(selected %in% as.character(1:6))) {
+    # Check if only option 3 is selected and OS is Windows
+    if (length(selected) == 1 && selected == "3" && .Platform$OS.type == "windows") {
+      svDialogs::dlg_message('Please be advised that selecting XGBoost alone is not currently an option in Windows.')$res} else {break}
+  } 
+  else {svDialogs::dlg_message("Invalid input. Please enter numbers from 1 to 6, separated by commas or spaces.")$res}
+}
+
+# Map selections to algorithm names
+algo_map <- c('DRF', 'GLM', 'XGBoost', 'GBM', 'DeepLearning', 'StackedEnsemble')
+algo <- algo_map[as.integer(selected)]
+
+# Repeat loop to get user input for the number of models to be tested
+repeat {
+  # Display input dialog box for the number of models
+  svDialogs::dlgInput('Please indicate how many models should be tested. By default 50 is a good choice for binary classification or 25 for multiclass classification.', password = TRUE)$res -> doyouwant
+  
+  num_input <- as.numeric(doyouwant)
+  # Check if the input is a valid number
+  if (!is.na(num_input) && num_input > 0) {
+    break
+  } else {
+    # Display message dialog box for invalid input
+    svDialogs::dlg_message('Please enter a valid response. To continue, please press the "Enter" key or click the "OK" button.')$res
+  }
+}
+
+# Assign the number of models to be tested to variable model_number
+model_number <- as.numeric(doyouwant)
+
+# Selection of variables
+data3[names(metadata[, grep(1, metadata[3, ])])] -> data4
+# If we remove row 3 from metadata, assign data3 to data4 (left as a precaution)
+data4$Class <- data3$Class
+
+# Split samples into training and validation sets
+inTrain <- createDataPartition(y = data4$Class, p = .70, list = FALSE)
+training <- data4[inTrain, ]
+validation <- data4[-inTrain, ]
+
+# Initialize H2O
+# h2o.init(nthreads = -1)
+h2o.init()
+train_set <- as.h2o(training, destination_frame = "Training_set")
+validation_set <- as.h2o(validation, destination_frame = "Validation_set")
+y <- 'Class'
+predictor <- setdiff(names(training), y)
+
+# Convert target variable to factor
+train_set[, y] <- as.factor(train_set[, y])
+validation_set[, y] <- as.factor(validation_set[, y])
+
+# Train models using H2O AutoML
+model_h2o <- h2o.automl(x = predictor, y = y, training_frame = train_set, max_models = model_number, seed = 1234, include_algos = algo)
+```
+
+
+### Metrics of the training process for the training dataset
+In H2O AutoML, classification model effectiveness is measured using several metrics:
+
+- **Mean Squared Error (MSE)** and **Root Mean Squared Error (RMSE)**: Measure average squared errors and their square root, indicating model accuracy.
+- **Logarithmic Loss (Logloss)**: Evaluates how close predicted probabilities are to actual class labels; lower values are better.
+- **Area Under the ROC Curve (AUC)** and **Area Under the Precision-Recall Curve (AUCPR)**: Assess the model's ability to distinguish between classes and the trade-off between precision and recall (for binomial models).
+- **R-squared (R²)**: Indicates the proportion of variance explained by the model.
+- **Akaike Information Criterion (AIC)**: Balances model fit and complexity; lower values indicate better models.
+
+These metrics help select the best model. For those without a statistical background, a confusion matrix offers a simpler way to evaluate classification effectiveness. It visually represents how samples are classified, showing misclassifications between real and predicted classes.
+
+Classification efficacy depends on three main factors:
+
+1. **Data Quality**
+2. **Algorithm Used**
+3. **Efficiency of MST Markers** in distinguishing contamination types
+
+This section evaluates the classification accuracy for the training dataset samples.
+
+```{r message=FALSE, warning=FALSE}
+# Display a message dialog box 
+svDialogs::dlg_message('This will display the results of the training process and its confusion matrix. To continue, please press the "Enter" key or click the "OK" button.')$res
+# Get the best model from the H2O AutoML results
+h2o.get_best_model(model_h2o) -> results_best_model
+print(results_best_model)
+
+# Get the results
+h2o.performance(model_h2o@leader, train_set)->performance_model
+print(performance_model)
+
+# Print the ROC curve for binomial models
+# Plot the ROC curve
+if (length(unique(data4$Class))==2){
+plot(performance_model, type = "roc")
+jpeg('ROC curves binomial trained model.jpeg', res = 600, width = 5, height = 5, units = 'in')  
+plot(performance_model, type = "roc") 
+dev.off()  
+  }
+
+# AUC Metrics with interpolated average ROC (macro) for multinomial distribution
+if (length(unique(data4$Class))!=2){
+# Load required libraries
+library(multiROC)
+library(ggplot2)
+
+# Predict probabilities from H2O model
+predictions <- h2o.predict(model_h2o@leader, validation_set)
+
+# Extract true labels and predicted probabilities
+y_true <- as.vector(validation_set[,'Class'])
+y_probs <- as.data.frame(predictions)[, -1]  # remove predicted class column
+
+# Ensure y_true is a factor and get class names from y_probs
+class_names <- colnames(y_probs)
+
+# One-hot encode true labels manually
+y_true <- factor(y_true, levels = class_names)  # ensure same order
+true_df <- as.data.frame(sapply(class_names, function(class) as.integer(y_true == class)))
+colnames(true_df) <- paste0(class_names, "_true")
+
+# Rename predicted probabilities
+colnames(y_probs) <- paste0(class_names, "_pred_m1")
+
+# Combine into one data frame for multiROC
+multi_df <- cbind(true_df, y_probs)
+
+# Compute ROC curves
+roc_res <- multi_roc(multi_df, force_diag = TRUE)
+
+# Prepare data for ggplot
+plot_df <- plot_roc_data(roc_res)
+
+
+# Extract and print AUC values directly and build a clean data frame
+annotation_df <- data.frame(
+  Group = c(class_names, "Macro", "Micro"),
+  AUC = as.numeric(unlist(roc_res$AUC))
+)
+
+cat('\n','AUC-Values of the multinomial classification','\n')
+print(annotation_df)
+
+# Plot using ggplot2 with facets
+print(ggplot(plot_df, aes(x = 1 - Specificity, y = Sensitivity)) +
+  geom_path(aes(color = Group), size = 1.2) +
+  facet_wrap(~ Group, scales = "fixed") +
+  labs(title = "Multiclass ROC Curves (multiROC)",x = "1-Specifity",y = "Sensitivity"  ) + theme(plot.title = element_text(size = 18, face = 'bold'), axis.title.x = element_text(size = 16), axis.title.y = element_text(size = 16), axis.text.x = element_text(size = 14, angle = 90), axis.text.y = element_text(size = 14), legend.text = element_text(size = 14), legend.title = element_text(size = 16, face = 'bold'), strip.text = element_text(size = 16,face = 'bold'), legend.position = "bottom")  + geom_text(data = annotation_df, aes(x = 0.6, y = 0.2, label = sprintf("AUC = %.8f", AUC)), size = 5, color = "black"))
+
+# Save the plot
+jpeg('ROC curves multinomial trained model.jpeg', res = 600, width = 10, height = 10, units = 'in')
+print(ggplot(plot_df, aes(x = 1 - Specificity, y = Sensitivity)) +
+  geom_path(aes(color = Group), size = 1.2) +
+  facet_wrap(~ Group, scales = "fixed") +
+  labs(title = "Multiclass ROC Curves (multiROC)",x = "1-Specifity",y = "Sensitivity"  ) + theme(plot.title = element_text(size = 18, face = 'bold'), axis.title.x = element_text(size = 16), axis.title.y = element_text(size = 16), axis.text.x = element_text(size = 14, angle = 90), axis.text.y = element_text(size = 14), legend.text = element_text(size = 14), legend.title = element_text(size = 16, face = 'bold'), strip.text = element_text(size = 16,face = 'bold'), legend.position = "bottom")  + geom_text(data = annotation_df, aes(x = 0.6, y = 0.2, label = sprintf("AUC = %.8f", AUC)), size = 5, color = "black"))
+dev.off()
+}
+
+# Display a message dialog box about showing and saving the results of the best trained model
+svDialogs::dlg_message('Now the metrics for the training dataset will be showed and saved as a HTML file. To proceed, please press the "Enter" key or click the "OK" button.')$res
+
+# Load the htmltools library
+library(htmltools)
+
+# Capture the output of the best model details
+model_details <- capture.output(print(results_best_model))
+
+# Ensure all lines are captured by concatenating the outputs
+full_output <- c(model_details)
+
+# Create HTML content with both outputs
+html_content <- tags$html(
+  tags$head(tags$title("Best Model Details and Confusion Matrix with training dataset")), 
+  tags$body(
+    tags$h1("Summary of the Best Model with the Training Dataset"), 
+    tags$pre(paste(full_output, collapse = "\n"))
+  )
+)
+
+# Save the HTML content to a file
+save_html(html_content, file = "Summary_of_the_best_trained_model_and_confusion_matrix_training_dataset.html")
+```
+
+
+### Metrics of the training process for the validation dataset
+As in the previous section, this section shows the classification performance metrics and the confusion matrix for the validation dataset.
+
+In order to evaluate the performance of the multinomial classification model, both micro-average and macro-average ROC curves are computed, along with their corresponding AUC values. The micro-average ROC/AUC is derived by aggregating the contributions of all classes into a single binary classification task. This is achieved by stacking all true positive, false positive, true negative, and false negative outcomes across all classes, and treating these values as a large binary classification. Conversely, the macro-average ROC/AUC is calculated by first computing individual ROC curves for each class using a one-vs-rest approach, where each class is designated as the positive class while the others are designated as the negative class. The results from all classes are then averaged to produce a single summary curve. In order to ensure smoothness and comparability across classes, linear interpolation was applied between the ROC points prior to the implementation of the averaging process.
+
+```{r message=FALSE, warning=FALSE}
+# Display a message dialog box 
+svDialogs::dlg_message('This will display and save the performance of the model with the validation dataset. To continue, please press the "Enter" key or click the "OK" button.')$res
+
+# Get the results
+h2o.performance(model_h2o@leader, validation_set)->performance_model
+print(performance_model)
+
+# Print the ROC curve for binomial models
+# Plot the ROC curve
+if (length(unique(data4$Class))==2){
+plot(performance_model, type = "roc")
+jpeg('ROC curves binomial validated model.jpeg', res = 600, width = 5, height = 5, units = 'in')  
+plot(performance_model, type = "roc") 
+dev.off()  
+  }
+
+# AUC Metrics with interpolated average ROC (macro) for multinomial distribution
+if (length(unique(data4$Class))!=2){
+# Load required libraries
+library(multiROC)
+library(ggplot2)
+
+# Predict probabilities from H2O model
+predictions <- h2o.predict(model_h2o@leader, validation_set)
+
+# Extract true labels and predicted probabilities
+y_true <- as.vector(validation_set[,'Class'])
+y_probs <- as.data.frame(predictions)[, -1]  # remove predicted class column
+
+# Ensure y_true is a factor and get class names from y_probs
+class_names <- colnames(y_probs)
+
+# One-hot encode true labels manually
+y_true <- factor(y_true, levels = class_names)  # ensure same order
+true_df <- as.data.frame(sapply(class_names, function(class) as.integer(y_true == class)))
+colnames(true_df) <- paste0(class_names, "_true")
+
+# Rename predicted probabilities
+colnames(y_probs) <- paste0(class_names, "_pred_m1")
+
+# Combine into one data frame for multiROC
+multi_df <- cbind(true_df, y_probs)
+
+# Compute ROC curves
+roc_res <- multi_roc(multi_df, force_diag = TRUE)
+
+# Prepare data for ggplot
+plot_df <- plot_roc_data(roc_res)
+
+
+# Extract and print AUC values directly and build a clean data frame
+annotation_df <- data.frame(
+  Group = c(class_names, "Macro", "Micro"),
+  AUC = as.numeric(unlist(roc_res$AUC))
+)
+
+cat('\n','AUC-Values of the multinomial classification','\n')
+print(annotation_df)
+
+# Plot using ggplot2 with facets
+print(ggplot(plot_df, aes(x = 1 - Specificity, y = Sensitivity)) +
+  geom_path(aes(color = Group), size = 1.2) +
+  facet_wrap(~ Group, scales = "fixed") +
+  labs(title = "Multiclass ROC Curves (multiROC)",x = "1-Specifity",y = "Sensitivity"  ) + theme(plot.title = element_text(size = 18, face = 'bold'), axis.title.x = element_text(size = 16), axis.title.y = element_text(size = 16), axis.text.x = element_text(size = 14, angle = 90), axis.text.y = element_text(size = 14), legend.text = element_text(size = 14), legend.title = element_text(size = 16, face = 'bold'), strip.text = element_text(size = 16,face = 'bold'), legend.position = "bottom")  + geom_text(data = annotation_df, aes(x = 0.6, y = 0.2, label = sprintf("AUC = %.8f", AUC)), size = 5, color = "black"))
+
+# Save the plot
+jpeg('ROC curves multinomial validated model.jpeg', res = 600, width = 10, height = 10, units = 'in')
+print(ggplot(plot_df, aes(x = 1 - Specificity, y = Sensitivity)) +
+  geom_path(aes(color = Group), size = 1.2) +
+  facet_wrap(~ Group, scales = "fixed") +
+  labs(title = "Multiclass ROC Curves (multiROC)",x = "1-Specifity",y = "Sensitivity"  ) + theme(plot.title = element_text(size = 18, face = 'bold'), axis.title.x = element_text(size = 16), axis.title.y = element_text(size = 16), axis.text.x = element_text(size = 14, angle = 90), axis.text.y = element_text(size = 14), legend.text = element_text(size = 14), legend.title = element_text(size = 16, face = 'bold'), strip.text = element_text(size = 16,face = 'bold'), legend.position = "bottom")  + geom_text(data = annotation_df, aes(x = 0.6, y = 0.2, label = sprintf("AUC = %.8f", AUC)), size = 5, color = "black"))
+dev.off()
+}
+
+# Load the htmltools library
+library(htmltools)
+
+# Capture the output of the best model details
+model_details <- capture.output(print(h2o.performance(model_h2o@leader, validation_set)))
+
+# Ensure all lines are captured by concatenating the outputs
+full_output <- c(model_details)
+
+# Create HTML content with both outputs
+html_content <- tags$html(
+  tags$head(tags$title("Best Model Details and Confusion Matrix with the Validation Dataset")), 
+  tags$body(
+    tags$h1("Summary of the Best Model with the Validation Dataset"), 
+    tags$pre(paste(full_output, collapse = "\n"))
+  )
+)
+
+# Save the HTML content to a file
+save_html(html_content, file = "Summary_of_the_best_trained_model_and_confusion_matrix_validation_dataset.html")
+```
+
+
+### Plots associated to automl best model
+This section presents graphs explaining the optimal auto machine learning model selected during training. 
+
+SHAP (SHapley Additive exPlanations) plots illustrate the relationship between input features and model predictions. Each feature is assigned an importance score that reflects its contribution to the prediction outcome:
+
+- **Positive SHAP values**: indicate that the feature increases the likelihood of a higher prediction.
+- **Negative SHAP values**: suggest that the feature decreases the prediction value
+
+In binary classification, SHAP plots are particularly useful for evaluating the effectiveness of MST (Microbial Source Tracking) markers. Effective markers typically show well-separated clusters of SHAP values (e.g., red and blue points), indicating strong discriminatory power between the two classes. When points are closely clustered, the marker may have limited ability to distinguish between classes.
+
+Unlike binomial classifications, where a single set of SHAP (SHapley Additive exPlanations) values is generated per sample, multinomial classifications require a distinct set of SHAP values for each class per sample. This significantly increases both computational demands and processing time.
+
+Due to this complexity, SHAP visualisations in multinomial classification are typically limited to a single class, which the user selects. The analysis is then conducted using the validation dataset, ensuring that the insights are based on unseen data and reflect the model’s generalisation capability.
+
+This approach allows for a focused interpretation of feature importance for the selected class, while maintaining computational efficiency.
+
+SHAP plots are available for tree-based models.
+
+Another method to identify effective MST parameters is the importance plot, which shows the relative importance of each feature in a trained model. This helps identify features that most influence the model's predictions.
+
+Note: Stacked Ensemble models do not include a variable importance plot due to their complexity.
+
+```{r message=FALSE, warning=FALSE}
+# Display a message dialog box 
+svDialogs::dlg_message('Next, the learning curve of the model, the significance of the MST markers, and the SHAP (SHapley Additive exPlanations) plots for the training and validation datasets will be saved as a JPEG file. Note that SHAP plots are available only for binomial classification or regression models trained using H2O tree-based models, including Random Forest, GBM, and XGBoost algorithms. To proceed, press "Enter" or click "OK".')$res
+
+
+# Save the learning curve plot as a JPEG file
+jpeg('Learning curve.jpeg', res = 600, width = 8, height = 5, units = 'in')
+print(h2o.learning_curve_plot(model_h2o@leader))
+dev.off()
+
+# Save the variable importance plot as a JPEG file
+jpeg('Importance.jpeg', res = 600, width = 8, height = 10, units = 'in')
+
+# Verify the type of model
+unsupported_models <- c("stackedensemble", "deeplearning", "glm")
+
+if (!(model_h2o@leader@algorithm %in% unsupported_models)) {
+ suppressMessages(suppressWarnings(
+print(try(h2o.varimp_plot(model_h2o@leader,num_of_features = length(names(metadata[, grep(1, metadata[3, ])])))))
+))
+} else {message("Variable importance plot is not available for non-tree based models.")
+  
+grid::grid.newpage()
+text.jpeg<-paste("Variable importance plot is not available for",as.character(model_h2o@leader@algorithm),'models',sep=' ')
+grid::grid.text(text.jpeg,x = 0.5, y = 0.5, gp = grid::gpar(fontsize = 16, col = "black"))
+}
+
+dev.off()
+
+# Save the SHAP summary plot for the training set as a JPEG file
+# Only for binomial (two classes) classification
+if (length(unique(data4$Class))==2){
+jpeg('SHAP of training.jpeg', res = 600, width = 8, height = 10, units = 'in')
+print(try((h2o.shap_summary_plot(model_h2o@leader, train_set, top_n_features = length(names(metadata[, grep(1, metadata[3, ])]))))))
+dev.off()
+} 
+
+# Save the SHAP summary plot for the validation set as a JPEG file
+# Only for binomial (two classes) classification
+if (length(unique(data4$Class))==2){
+jpeg('SHAP of validation.jpeg', res = 600, width = 8, height = 10, units = 'in')
+print(try(h2o.shap_summary_plot(model_h2o@leader, validation_set, top_n_features = length(names(metadata[, grep(1, metadata[3, ])])))))
+dev.off()
+} 
+
+
+# Multiclass SHAP summary for every class and only for validation
+if (length(unique(data4$Class)) > 2) {
+
+  library(dplyr)
+  library(tidyr)
+
+  # For multinomial classification
+  classes <- unique(data4$Class)
+  class.selection <- sapply(1:length(classes), function(i) paste(classes[i], "= (", i, ")"))
+
+  
+  svDialogs::dlg_message('The current classification is of the multinomial type. The subsequent stage of the process is to select the class for the execution of the SHAP analysis.')$res
+  
+  repeat {
+    # Display input dialog box for class selection
+    selection <- svDialogs::dlgInput(
+      paste(class.selection, collapse = "\n"),
+      "Please, select a class:"
+    )$res
+
+    num_input <- as.numeric(selection)
+
+    if (!is.na(num_input) && num_input > 0 && num_input <= length(classes)) {
+      break
+    } else {
+      svDialogs::dlg_message('Please enter a valid response.')$res
+    }
+  }
+
+  fav_class <- classes[num_input]
+  classes <- setdiff(data4$Class, fav_class)
+
+  models <- list()
+  shap_values_all <- list()
+  test_df_all <- list()
+
+  for (cls in classes) {
+    bin_data <- data4 %>% filter(Class %in% c(fav_class, cls))
+    bin_data$Class <- factor(bin_data$Class, levels = c(fav_class, cls))
+
+    bin_h2o <- as.h2o(bin_data)
+    splits <- h2o.splitFrame(bin_h2o, ratios = 0.7, seed = 1234)
+    train_bin <- splits[[1]]
+    test_bin <- splits[[2]]
+
+    mdl <- h2o.gbm(
+      x = predictor, y = "Class",
+      training_frame = train_bin,
+      validation_frame = test_bin,
+      distribution = "bernoulli",
+      seed = 1234,
+      ntrees = 50,
+      max_depth = 5
+    )
+
+    shap <- h2o.predict_contributions(mdl, test_bin)
+    shap_df <- as.data.frame(shap)
+    shap_df$ID <- 1:nrow(shap_df)
+
+    models[[cls]] <- mdl
+    shap_values_all[[cls]] <- shap_df
+    test_df_all[[cls]] <- as.data.frame(test_bin)
+  }
+
+  for (cls in names(shap_values_all)) {
+    shap_df <- shap_values_all[[cls]]
+    test_df <- test_df_all[[cls]]
+    predictors <- setdiff(names(test_df), "Class")
+
+    shap_long <- shap_df %>%
+      pivot_longer(-ID, names_to = "Feature", values_to = "SHAP") %>%
+      filter(Feature != "BiasTerm") %>%
+      left_join(
+        test_df %>%
+          mutate(ID = 1:nrow(.)) %>%
+          pivot_longer(-c(ID, Class), names_to = "Feature", values_to = "value"),
+        by = c("ID", "Feature")
+      ) %>%
+      group_by(Feature) %>%
+      mutate(norm_value = (value - min(value, na.rm = TRUE)) / 
+                         (max(value, na.rm = TRUE) - min(value, na.rm = TRUE))) %>%
+      ungroup()
+
+    top_features <- shap_long %>%
+      group_by(Feature) %>%
+      summarise(mean_abs = mean(abs(SHAP)), .groups = "drop") %>%
+      arrange(desc(mean_abs)) %>%
+      slice_head(n =  length(names(metadata[, grep(1, metadata[3, ])]))) %>%
+      pull(Feature)
+
+    shap_top <- filter(shap_long, Feature %in% top_features)
+    shap_top$Feature <- factor(shap_top$Feature, levels = rev(top_features))
+
+    class_labels <- unique(test_df$Class)
+    plot_title <- paste0(class_labels[1], " vs ", class_labels[2])
+    name.jpeg<-paste(class_labels[1],"_",class_labels[2],'_full_set_SHAP.jpeg',sep='')
+   
+ggplot(shap_top, aes(x = SHAP, y = Feature, color = Class)) +
+geom_point(aes(size = norm_value), alpha = 0.6) +
+geom_vline(xintercept = 0, linetype = "dashed") +
+labs(title = plot_title,x = "SHAP Contribution",y = "Feature",color = "Class",      size = "Normalized\nValue") + scale_color_manual(values = c("#1f78b4", "#e31a1c")) +         theme_minimal(base_size = 14)->plot.shap.full
+jpeg(name.jpeg,res = 600, width = 8, height = 10, units = 'in')
+print(plot.shap.full)
+dev.off()
+  }
+}
+```
+
+## The model is stored in a file.
+This section provides the code to save the trained model. This is important because H2O allows uploading a previously trained model to classify new samples without repeating the training process. Ichnaea-MST includes a module to load a trained model, extract information, and classify a new dataset. For more help, refer to the module's help section.
+
+```{r message=FALSE, warning=FALSE}
+# Display a message dialog box 
+svDialogs::dlg_message('In the next stage, the trained machine learning model will be saved. This model can be used later with the "UPLOAD MODEL & CLASSIFICATION MODULE" for new classifications. It is recommended to consult the help section of that module for guidance on saving the trained model. To proceed, press "Enter" or click "OK".')$res
+
+repeat {
+  # Prompt the user to indicate whether they wish to save the machine learning model in a file
+  doyouwant <- svDialogs::dlgInput('Please indicate whether you wish to save the machine learning model in a file (y/n).', password = TRUE)$res
+  
+  # Check if the user input is valid (either 'y', 'Y', 'n', or 'N')
+  if (doyouwant %in% c('y', 'Y', 'n', 'N')) {
+    break
+  } else {
+    # Prompt the user to enter a valid response if the input is invalid
+    svDialogs::dlg_message('Please enter a valid response. To continue, please press the "Enter" key or click the "OK" button.')$res
+  }
+}
+
+# If the user wants to save the machine learning model
+if (tolower(doyouwant) == 'y') {
+  # Save the best model to the current working directory
+  try(h2o.saveModel(object = h2o.get_best_model(model_h2o), force = TRUE, path = getwd()))
+}
+```
+
+
+## Theoretical model optimisation
+H2O Infogram is a graphical tool designed to identify the most valuable and unique features driving the response in supervised classification problems. It plots variables on a two-dimensional grid of total versus net information:
+- **X-axis**: Predictive power
+- **Y-axis**: Uniqueness of each variable
+
+The infogram generates a graph with a reduced set of MST markers, helping users enhance model efficiency by reducing the number of necessary MST markers.
+
+The script uses three distinct datasets:
+- **Training**: 60% of the samples, used to calibrate the model's parameters.
+- **Validation**: 20% of the samples, used to evaluate the model's performance, fine-tune hyperparameters, and prevent overfitting.
+- **Testing**: 20% of the samples, reserved for final evaluation (performance metrics, confusion matrix, and associated plots).
+
+In this section, users can select the option to reduce MST markers, emphasizing which class needs better identification.
+
+```{r message=FALSE, warning=FALSE}
+# Dialogbox
+svDialogs::dlg_message('The H2O-infogram is a graphical tool for information-theoretic interpretability, helping users quickly identify the key variables that significantly impact the response. It highlights crucial MST markers for classification, allowing for a reduction in predictors, though this may slightly affect classification performance metrics. Since training samples are generated using Monte Carlo methods, the selection of MST markers for the reduced model may vary between simulations. By default, GBM is used as the learning algorithm to construct the infogram. To proceed, press "Enter" or click "OK".')$res 
+
+# Prompt the user to indicate whether they wish to save the machine learning model in a file
+  doyouwant.reduction <- svDialogs::dlgInput('Please indicate whether you wish to start the H2O-infogram analysis (y/n).', password = TRUE)$res
+ 
+repeat { 
+  # Check if the user input is valid (either 'y', 'Y', 'n', or 'N')
+  if (doyouwant.reduction %in% c('y', 'Y', 'n', 'N')) {
+    break
+  } else {
+    # Prompt the user to enter a valid response if the input is invalid
+    svDialogs::dlg_message('Please enter a valid response. To continue, please press the "Enter" key or click the "OK" button.')$res
+  }
+}
+
+# If the user wants to save the machine learning model
+if (tolower(doyouwant.reduction) == 'y') {
+
+# Selection of variables
+data3[names(metadata[, grep(1, metadata[3, ])])] -> data4
+data4$Class <- data3$Class
+
+# Split the data into training, validation, and test sets
+splits <- h2o.splitFrame(
+  data = as.h2o(data4), 
+  ratios = c(0.6, 0.2), 
+  destination_frames = c("Training_Infogram", "Validation_Infogram", "Testing_Infogram"), seed = 1234)
+train <- splits[[1]]
+valid <- splits[[2]]
+test  <- splits[[3]]
+y <- 'Class'
+predictor <- setdiff(names(training), y)
+
+# Convert the target variable to a factor
+train[, y] <- as.factor(train[, y])
+valid[, y] <- as.factor(valid[, y])
+test[, y] <- as.factor(test[, y])
+
+# Generate the infogram for the predictors
+h2o.infogram(x = predictor, y = y, training_frame = train, validation_frame = valid, nfolds = 10, top_n_features = length(names(metadata[, grep(1, metadata[3, ])]))) -> infogram.results
+print(plot(infogram.results))
+
+# Save the infogram plot as a JPEG file
+jpeg('Infogram plot.jpeg', res = 600, width = 5, height = 5, units = 'in')
+print(plot(infogram.results))
+dev.off()
+
+# Display a message dialog box 
+svDialogs::dlg_message('The next stage involves training a model with a reduced number of MST predictors. 60% of samples will be used for training, 20% for internal validation, and 20% for model evaluation. You need to specify which response categories are considered "positive/favorable outcomes". If there is a class for "human contamination", please select it. To proceed, press "Enter" or click "OK".')$res
+
+unique(data4$Class) -> classes
+class.selection <- sapply(1:length(classes), function(i) paste(classes[i], '= (', i, ')'))
+
+repeat {
+  # Display input dialog box for the number of models
+  selection <- svDialogs::dlgInput(paste(class.selection, collapse = "\n"), "Please input here the number of the class")$res->doyouwant
+  num_input <- as.numeric(doyouwant)
+  
+  # Check if the input is a valid number
+  if (!is.na(num_input) && num_input > 0 && num_input <= length(classes)) {
+    
+    break
+  } else {
+    # Display message dialog box for invalid input
+    svDialogs::dlg_message('Please enter a valid response. To continue, please press the "Enter" key or click the "OK" button.')$res
+  }
+}
+
+doyouwant<-classes[as.numeric(doyouwant)]
+favorable_class.shap<-doyouwant
+# Train subset models based on the infogram results
+infogram_models <- h2o.infogram_train_subset_models(infogram.results, h2o.gbm, train, valid, y, favorable_class = doyouwant)
+
+# Get the best model from the infogram models
+h2o.getModel(infogram_models$model_id[1]) 
+infogram.results@admissible_score
+
+# Capture the admissible score details
+model_details <- capture.output(print(infogram.results@admissible_score)) 
+
+# Create HTML content for the infogram results
+html_content <- tags$html(tags$head(tags$title('Reduced set of MST-predictors')), tags$body(tags$h1("Infogram results"), tags$pre(paste(model_details, collapse = "\n"))))
+
+# Save HTML content to a file
+save_html(html_content, file = "Infogram_results.html")
+
+# Select the admissible features from the data
+data3[infogram.results@admissible_features] -> data4
+data4$Class <- data3$Class
+
+# Split the data into training, validation, and test sets again
+splits <- h2o.splitFrame(
+  data = as.h2o(data4), 
+  ratios = c(0.6, 0.2), 
+  destination_frames = c("Training_reduced", "Validation_reduced", "Testing_reduced"), seed = 1234)
+
+train <- splits[[1]]
+valid <- splits[[2]]
+test  <- splits[[3]]
+y <- 'Class'
+predictor <- setdiff(names(train), y)
+
+# Convert the target variable to a factor again
+train[, y] <- as.factor(train[, y])
+valid[, y] <- as.factor(valid[, y])
+test[, y] <- as.factor(test[, y])
+
+# Train a GBM model with the reduced set of predictors
+h2o.gbm(x = predictor, y = y, training_frame = train, validation_frame = valid, ntrees = 50, max_depth = 0, nfolds = 10) -> model.reduced
+
+
+# Display a message dialog box 
+svDialogs::dlg_message('Next, the learning curve of the model, the significance of the MST markers, and the SHAP (SHapley Additive exPlanations) plots from the H2O-infogram analysis will be saved as a JPEG file. To proceed, press "Enter" or click "OK".')$res
+
+# Plot and save the learning curve for the reduced model
+try(h2o.learning_curve_plot(model.reduced))
+jpeg('Reduced_set_Learning curve.jpeg', res = 600, width = 5, height = 5, units = 'in')
+print(try(h2o.learning_curve_plot(model.reduced)))
+dev.off()
+
+# Plot and save the variable importance for the reduced model
+print(try(h2o.varimp_plot(model.reduced)))
+
+jpeg('Reduced_set_Importance.jpeg', res = 600, width = 5, height = 5, units = 'in')
+print(try(h2o.varimp_plot(model.reduced)))
+dev.off()
+
+# Save the SHAP summary plot for the training set as a JPEG file
+# Only for binomial (two classes) classification
+if (length(unique(data4$Class))==2){
+print(try(h2o.shap_summary_plot(model.reduced, test)))
+jpeg('Reduced_set_SHAP.jpeg', res = 600, width = 5, height = 5, units = 'in')
+print(try(h2o.shap_summary_plot(model.reduced, test)))
+dev.off()
+} else {
+  
+ fav_class <- favorable_class.shap
+  classes <- setdiff(classes, favorable_class.shap)
+
+  models <- list()
+  shap_values_all <- list()
+  test_df_all <- list()
+
+  for (cls in classes) {
+    bin_data <- data4 %>% filter(Class %in% c(fav_class, cls))
+    bin_data$Class <- factor(bin_data$Class, levels = c(fav_class, cls))
+
+    bin_h2o <- as.h2o(bin_data)
+    splits <- h2o.splitFrame(bin_h2o, ratios = 0.7, seed = 1234)
+    train_bin <- splits[[1]]
+    test_bin <- splits[[2]]
+
+    mdl <- h2o.gbm(
+      x = predictor, y = "Class",
+      training_frame = train_bin,
+      validation_frame = test_bin,
+      distribution = "bernoulli",
+      seed = 1234,
+      ntrees = 50,
+      max_depth = 5
+    )
+
+    shap <- h2o.predict_contributions(mdl, test_bin)
+    shap_df <- as.data.frame(shap)
+    shap_df$ID <- 1:nrow(shap_df)
+
+    models[[cls]] <- mdl
+    shap_values_all[[cls]] <- shap_df
+    test_df_all[[cls]] <- as.data.frame(test_bin)
+  }
+
+  for (cls in names(shap_values_all)) {
+    shap_df <- shap_values_all[[cls]]
+    test_df <- test_df_all[[cls]]
+    predictors <- setdiff(names(test_df), "Class")
+
+    shap_long <- shap_df %>%
+      pivot_longer(-ID, names_to = "Feature", values_to = "SHAP") %>%
+      filter(Feature != "BiasTerm") %>%
+      left_join(
+        test_df %>%
+          mutate(ID = 1:nrow(.)) %>%
+          pivot_longer(-c(ID, Class), names_to = "Feature", values_to = "value"),
+        by = c("ID", "Feature")
+      ) %>%
+      group_by(Feature) %>%
+      mutate(norm_value = (value - min(value, na.rm = TRUE)) / 
+                         (max(value, na.rm = TRUE) - min(value, na.rm = TRUE))) %>%
+      ungroup()
+
+    top_features <- shap_long %>%
+      group_by(Feature) %>%
+      summarise(mean_abs = mean(abs(SHAP)), .groups = "drop") %>%
+      arrange(desc(mean_abs)) %>%
+      slice_head(n =  length(names(metadata[, grep(1, metadata[3, ])]))) %>%
+      pull(Feature)
+
+    shap_top <- filter(shap_long, Feature %in% top_features)
+    shap_top$Feature <- factor(shap_top$Feature, levels = rev(top_features))
+
+    class_labels <- unique(test_df$Class)
+    plot_title <- paste0(class_labels[1], " vs ", class_labels[2])
+    name.jpeg<-paste(class_labels[1],"_",class_labels[2],'_reduced_set_SHAP.jpeg',sep='')
+   
+ggplot(shap_top, aes(x = SHAP, y = Feature, color = Class)) +
+geom_point(aes(size = norm_value), alpha = 0.6) +
+geom_vline(xintercept = 0, linetype = "dashed") +
+labs(title = plot_title,x = "SHAP Contribution",y = "Feature",color = "Class",      size = "Normalized\nValue") + scale_color_manual(values = c("#1f78b4", "#e31a1c")) +         theme_minimal(base_size = 14)->plot.shap.full
+jpeg(name.jpeg,res = 600, width = 8, height = 10, units = 'in')
+print(plot.shap.full)
+dev.off() 
+  }
+}
+
+# Generate and print the confusion matrix for the reduced model
+print(try(h2o.confusionMatrix(model.reduced, test)))
+
+  
+# Displays the samples which are under the LOD
+lod_zeros_infogram <-LOD_detection(metadata[2,], toclassify[, c("ID", infogram.results@admissible_features)])
+
+
+svDialogs::dlg_message(paste('The model with a reduced set of MST markers contains', length(metadata[2, predictor]), 
+    'markers. The next step is to verify which samples of the classification has a 100% of MST markers have values below the limit of detection (LOD) or they are zero. If any of these events occur, a pop-up window will appear indicating which samples are affected. The training and classification process can carry on, but bear in mind that these types of samples have a high risk to be put into the wrong class.', collapse = ", "))$res
+
+if (length(lod_zeros$LOD)!=0){
+# Display a message dialog requesting the estimation of the maximum dilution fold for MST markers
+svDialogs::dlg_message(paste('The following samples are at RISK OF MISCLASSIFICATION due to containing all of the MST markers below their LOD.',paste(lod_zeros_infogram$ID[lod_zeros_infogram$LOD == 100], collapse = ", ")))$res}
+
+if (length(lod_zeros$Zeros)!=0){
+# Display a message dialog requesting the estimation of the maximum dilution fold for MST markers
+svDialogs::dlg_message(paste('The following samples are at VERY HIGH RISK OF MISCLASSIFICATION. It is strongly recommended to critically evaluate whether these samples should be included in the analysis because all of their MST markers have a value of zero.',paste(lod_zeros_infogram$ID[lod_zeros_infogram$Zeros == 100], collapse = ", ")))$res}
+
+if (length(lod_zeros_infogram$LOD)!=0 | length(lod_zeros_infogram$Zeros)!=0 ){
+# To save the table showing the samples < LOD or Zero
+repeat {
+  svDialogs::dlgInput('Please indicate whether you wish to save the percentages of MST variables with values less than LOD or zeros in a spreadsheet (y/n)?', password = TRUE)$res->doyouwant
+  if (doyouwant %in% c('y', 'Y', 'n', 'N')) {
+    break
+  } else {
+    svDialogs::dlg_message('Please enter a valid response. To continue, please press the "Enter" key or click the "OK" button.')$res
+  }
+}
+
+# If the user indicates that the data should be saved, proceed with the following steps
+if (tolower(doyouwant) == 'y'){
+  repeat {
+    svDialogs::dlgInput('Please indicate whether you wish to save the file in the Excel (1), Calc (2), CSV (3), Stata (4) or SPSS (5) spreadsheet format (1 to 5).', password = TRUE)$res->doyouwant
+    if (doyouwant %in% c('1', '2', '3', '4', '5')) {
+      break
+    } else {
+      svDialogs::dlg_message('Please enter a valid response. To continue, please press the "Enter" key or click the "OK" button.')$res
+    }
+  }  
+  
+  # Save the data in the selected format and display a confirmation message
+  if (doyouwant=='1' ){
+    file_path <- 'LOD_Zero_infogram_table.xlsx'
+    save_data(lod_zeros_infogram, file_path)
+    svDialogs::dlg_message('The data file has been generated with the name LOD_Zero_infogram_table.xlsx. To continue, please press the "Enter" key or click the "OK" button.')$res
+  }
+  
+  if (doyouwant=='2' ){
+    file_path <- 'LOD_Zero_infogram_table.ods'
+    save_data(lod_zeros_infogram, file_path)
+    svDialogs::dlg_message('The data file has been generated with the name LOD_Zero_infogram_table.ods. To continue, please press the "Enter" key or click the "OK" button.')$res
+  }
+  
+  if (doyouwant=='3' ){
+    file_path <- 'LOD_Zero_infogram_table.csv'
+    save_data(lod_zeros_infogram, file_path)
+    svDialogs::dlg_message('The data file has been generated with the name LOD_Zero_infogram_table.csv. To continue, please press the "Enter" key or click the "OK" button.')$res
+  }  
+  
+  if (doyouwant=='4' ){
+    file_path <- 'LOD_Zero_infogram_table.dta'
+    save_data(lod_zeros_infogram, file_path)
+    svDialogs::dlg_message('The data file has been generated with the name LOD_Zero_infogram_table.dta. To continue, please press the "Enter" key or click the "OK" button.')$res
+  }    
+  
+  if (doyouwant=='5' ){
+    file_path <- 'LOD_Zero_infogram_table.sav'
+    save_data(lod_zero_infograms, file_path)
+    svDialogs::dlg_message('The data file has been generated with the name LOD_Zero_infogram_table.sav. To continue, please press the "Enter" key or click the "OK" button.')$res
+  }
+}
+}  
+}
+```
+
+
+### Metrics of the training process for the model with reduced MST markers
+As in the previous section, this section presents the classification performance metrics and confusion matrix for the reduced MST-markers training model using the testing dataset.
+
+```{r message=FALSE, warning=FALSE}
+if (tolower(doyouwant.reduction) == 'y') {
+# Display a message dialog box 
+svDialogs::dlg_message('This will display and save the performance of the reduced model with the test dataset. To proceed, please press the "Enter" key or click the "OK" button.')$res
+
+# Get the results
+h2o.performance(model.reduced, test)->performance_reduced_model
+print(performance_reduced_model)
+
+# Print the ROC curve for binomial models
+# Plot the ROC curve
+if (length(unique(data4$Class))==2){
+plot(performance_reduced_model, type = "roc")
+jpeg('ROC curves binomial reduced model.jpeg', res = 600, width = 10, height = 10, units = 'in')  
+plot(performance_reduced_model, type = "roc") 
+dev.off()  
+  }
+
+# AUC Metrics with interpolated average ROC (macro) for multinomial distribution
+if (length(unique(data4$Class))!=2){
+# Load required libraries
+library(multiROC)
+library(ggplot2)
+
+# Predict probabilities from H2O model
+predictions <- h2o.predict(model.reduced, test)
+
+#  Extract true labels and predicted probabilities
+y_true <- as.vector(test[,'Class'])
+y_probs <- as.data.frame(predictions)[, -1]  # remove predicted class column
+
+#  Ensure y_true is a factor and get class names from y_probs
+class_names <- colnames(y_probs)
+
+#  One-hot encode true labels manually
+y_true <- factor(y_true, levels = class_names)  # ensure same order
+true_df <- as.data.frame(sapply(class_names, function(class) as.integer(y_true == class)))
+colnames(true_df) <- paste0(class_names, "_true")
+
+#  Rename predicted probabilities
+colnames(y_probs) <- paste0(class_names, "_pred_m1")
+
+#  Combine into one data frame for multiROC
+multi_df <- cbind(true_df, y_probs)
+
+#  Compute ROC curves
+roc_res <- multi_roc(multi_df, force_diag = TRUE)
+
+# Prepare data for ggplot
+plot_df <- plot_roc_data(roc_res)
+
+
+# Extract and print AUC values directly and build a clean data frame
+annotation_df <- data.frame(
+  Group = c(class_names, "Macro", "Micro"),
+  AUC = as.numeric(unlist(roc_res$AUC))
+)
+
+cat('\n','AUC-Values of the multinomial classification','\n')
+print(annotation_df)
+
+# Plot using ggplot2 with facets
+print(ggplot(plot_df, aes(x = 1 - Specificity, y = Sensitivity)) +
+  geom_path(aes(color = Group), size = 1.2) +
+  facet_wrap(~ Group, scales = "fixed") +
+  labs(title = "Multiclass ROC Curves (multiROC)",x = "1-Specifity",y = "Sensitivity"  ) + theme(plot.title = element_text(size = 18, face = 'bold'), axis.title.x = element_text(size = 16), axis.title.y = element_text(size = 16), axis.text.x = element_text(size = 14, angle = 90), axis.text.y = element_text(size = 14), legend.text = element_text(size = 14), legend.title = element_text(size = 16, face = 'bold'), strip.text = element_text(size = 16,face = 'bold'), legend.position = "bottom")  + geom_text(data = annotation_df, aes(x = 0.6, y = 0.2, label = sprintf("AUC = %.8f", AUC)), size = 5, color = "black"))
+
+# Save the plot
+jpeg('ROC curves multinomial reduced model.jpeg', res = 600, width = 10, height = 10, units = 'in')
+print(ggplot(plot_df, aes(x = 1 - Specificity, y = Sensitivity)) +
+  geom_path(aes(color = Group), size = 1.2) +
+  facet_wrap(~ Group, scales = "fixed") +
+  labs(title = "Multiclass ROC Curves (multiROC)",x = "1-Specifity",y = "Sensitivity"  ) + theme(plot.title = element_text(size = 18, face = 'bold'), axis.title.x = element_text(size = 16), axis.title.y = element_text(size = 16), axis.text.x = element_text(size = 14, angle = 90), axis.text.y = element_text(size = 14), legend.text = element_text(size = 14), legend.title = element_text(size = 16, face = 'bold'), strip.text = element_text(size = 16,face = 'bold'), legend.position = "bottom")  + geom_text(data = annotation_df, aes(x = 0.6, y = 0.2, label = sprintf("AUC = %.8f", AUC)), size = 5, color = "black"))
+dev.off()
+}
+
+
+# Load the htmltools library
+library(htmltools)
+
+# Capture the output of the best model details
+model_details <- capture.output(print(h2o.performance(model.reduced, test)))
+
+# Ensure all lines are captured by concatenating the outputs
+full_output <- c(model_details)
+
+# Create HTML content with both outputs
+html_content <- tags$html(
+  tags$head(tags$title("Best Model Details and Confusion Matrix with the model with a reduced set of predictors")), 
+  tags$body(
+    tags$h1("Summary of the Best Model"), 
+    tags$pre(paste(full_output, collapse = "\n"))
+  )
+)
+
+# Save the HTML content to a file
+save_html(html_content, file = "Summary_of_the_best_trained_model_and_confusion_matrix_reduced_set.html")
+
+}
+```
+
+
+### The reduced model is stored in a file.
+As previously stated, the reduced model can also be stored for future use.
+
+```{r message=FALSE, warning=FALSE}
+if (tolower(doyouwant.reduction) == 'y') {
+# Display a message dialog box 
+svDialogs::dlg_message('In the next step, save the MST-markers reduced model, which can later be used with the "UPLOAD MODEL & CLASSIFICATION MODULE" for new classifications. For guidance on saving the model, refer to the help section of the module. To continue, press "Enter" or click "OK".')$res
+
+repeat {
+  # Prompt the user to indicate whether they wish to save the machine learning model in a file
+  doyouwant <- svDialogs::dlgInput('Please indicate whether you wish to save the machine learning model in a file (y/n).', password = TRUE)$res
+  
+  # Check if the user input is valid (either 'y', 'Y', 'n', or 'N')
+  if (doyouwant %in% c('y', 'Y', 'n', 'N')) {
+    break
+  } else {
+    # Prompt the user to enter a valid response if the input is invalid
+    svDialogs::dlg_message('Please enter a valid response. To continue, please press the "Enter" key or click the "OK" button.')$res
+  }
+}
+
+# If the user wants to save the machine learning model
+if (tolower(doyouwant) == 'y') {
+  # Save the best model to the current working directory
+  try(h2o.saveModel(object = model.reduced, force = TRUE, path = getwd()))
+}
+}
+```
+
+
+
+
+# Classification
+This section initiates the classification process. Two key points to emphasize:
+
+1. **Dataset Structure**: The dataset must have the correct structure for classification. Refer to the help documentation for details.
+2. **H2O Framework**: There's no need to remove extra variables not found in the trained models (including the reduced model), so the user doesn't need to modify the original data structure.
+
+## Print and save in a file the result of the classification of the samples with all the predictors
+This section is concerned with the classification of the dataset using the model containing all the MST-markers. The user is prompted to save the results in a spreadsheet file.
+
+```{r message=FALSE, warning=FALSE}
+# Display a message dialog box 
+svDialogs::dlg_message('In the next step, the dataset will be classified, showing the expected class and probabilities for all classes. If the expected class differs from the class with the highest probability, use the class with the highest probability. To continue, press "Enter" or click "OK".')$res
+
+# Convert the data to H2O format and exclude the first column
+toclassify_pred <- as.h2o(toclassify[, c(-1)], destination_frame = "Classification_dataset_all_markers")
+# Predict using the H2O model
+toclassify_pred <- h2o.predict(model_h2o@leader, toclassify_pred)
+
+# Convert the predictions to a data frame
+as.data.frame(toclassify_pred) -> toclassify_pred
+# Combine the original IDs with the predictions
+cbind(toclassify[, 1], toclassify_pred) -> df_pred
+# Rename the columns of the combined data frame
+names(df_pred) <- c('ID', names(toclassify_pred))
+
+# Print the combined data frame
+print(df_pred)
+
+# Capture the model details as text
+model_details <- capture.output(print(df_pred)) 
+
+# Create HTML content for the classification results
+html_content <- tags$html(tags$head(tags$title("Classification with all MST-markers")), tags$body(tags$h1("Classification with all MST-marker"), tags$pre(paste(model_details, collapse = "\n"))))
+
+# Save HTML content to a file
+save_html(html_content, file = "Classification with all MST-markers.html")
+
+# Display a message dialog box to prompt the user to save the classification results
+svDialogs::dlg_message('Create a copy of the classification results using all MST-markers as a data file. Indicate if you want to save it in a spreadsheet format. To continue, press "Enter" or click "OK".')$res
+
+repeat {
+  # Prompt the user to select the file format for saving the results
+  doyouwant <- svDialogs::dlgInput('Please indicate whether you wish to save the file in the Excel (1), Calc (2), CSV (3), Stata (4) or SPSS (5) spreadsheet format (1 to 5).', password = TRUE)$res
+  
+  # Check if the user input is valid (either '1', '2', '3', '4', or '5')
+  if (doyouwant %in% c('1', '2', '3', '4', '5')) {
+    break
+  } else {
+    # Prompt the user to enter a valid response if the input is invalid
+    svDialogs::dlg_message('Please enter a valid response. To continue, please press the "Enter" key or click the "OK" button.')$res
+  }
+}
+
+# Save the results in the selected file format
+if (doyouwant == '1') {
+  file_path <- 'Predictions_table.xlsx'
+  save_data(df_pred, file_path)
+  svDialogs::dlg_message('The data file has been generated with the name: "Predictions_table.xlsx". To continue, please press the "Enter" key or click the "OK" button.')$res
+}
+
+if (doyouwant == '2') {
+  file_path <- 'Predictions_table.ods'
+  save_data(df_pred, file_path)
+    svDialogs::dlg_message('The data file has been generated with the name: "Predictions_table.ods". To continue, please press the "Enter" key or click the "OK" button.')$res
+}
+
+if (doyouwant == '3') {
+  file_path <- 'Predictions_table.csv'
+  save_data(df_pred, file_path)
+    svDialogs::dlg_message('The data file has been generated with the name: "Predictions_table.csv". To continue, please press the "Enter" key or click the "OK" button.')$res
+}
+
+if (doyouwant == '4') {
+  file_path <- 'Predictions_table.dta'
+  save_data(df_pred, file_path)
+    svDialogs::dlg_message('The data file has been generated with the name: "Predictions_table.dta". To continue, please press the "Enter" key or click the "OK" button.')$res
+}
+
+if (doyouwant == '5') {
+  file_path <- 'Predictions_table.sav'
+  save_data(df_pred, file_path)
+    svDialogs::dlg_message('The data file has been generated with the name "Predictions_table.sav". To continue, please press the "Enter" key or click the "OK" button.')$res
+}
+```
+
+
+
+## Print and save in a file the result of the classification of the samples with the reduced set of predictors
+This section is concerned with the classification of the dataset using the model containing a reduce set of MST-markers. The user is prompted to save the results in a spreadsheet file.
+
+```{r message=FALSE, warning=FALSE}
+if (tolower(doyouwant.reduction) == 'y') {
+  
+# Display a message dialog box 
+svDialogs::dlg_message('In the next step, the dataset will be classified using the reduced MST-markers model, showing the expected class and probabilities for all classes. If the expected class differs from the class with the highest probability, use the class with the highest probability. To continue, press "Enter" or click "OK".')$res  
+  
+# Convert the data to H2O format and exclude the first column
+toclassify_pred.reduced <- as.h2o(toclassify[, c(-1)], destination_frame = "Classification_dataset_reduced_markers")
+# Predict using the reduced H2O model
+toclassify_pred.reduced <- h2o.predict(model.reduced, toclassify_pred.reduced)
+
+# Convert the predictions to a data frame
+as.data.frame(toclassify_pred.reduced) -> toclassify_pred.reduced
+# Combine the original IDs with the predictions
+cbind(toclassify[, 1], toclassify_pred.reduced) -> df_pred.reduced
+# Rename the columns of the combined data frame
+names(df_pred.reduced) <- c('ID', names(toclassify_pred.reduced))
+
+# Print the combined data frame
+print(df_pred.reduced)
+
+# Capture the model details as text
+model_details <- capture.output(print(df_pred.reduced)) 
+
+# Create HTML content for the classification results
+html_content <- tags$html(tags$head(tags$title("Classification with the reduced set of MST-markers")), tags$body(tags$h1("Classification with the reduced set of MST-marker"), tags$pre(paste(model_details, collapse = "\n"))))
+
+# Save HTML content to a file
+save_html(html_content, file = "Classification with reduced set MST-markers.html")
+
+# Display a message dialog box to prompt the user to save the classification results
+svDialogs::dlg_message('It would be prudent to create a duplicate of results of the classification using the reduced set of MST-markers in the form of a data file. Please indicate whether you wish to save the file in a spreadsheet format. To proceed, please press the "Enter" key or click the "OK" button.')$res
+
+repeat {
+  # Prompt the user to select the file format for saving the results
+  doyouwant <- svDialogs::dlgInput('Please indicate whether you wish to save the file in the Excel (1), Calc (2), CSV (3), Stata (4) or SPSS (5) spreadsheet format (1 to 5).', password = TRUE)$res
+  
+  # Check if the user input is valid (either '1', '2', '3', '4', or '5')
+  if (doyouwant %in% c('1', '2', '3', '4', '5')) {
+    break
+  } else {
+    # Prompt the user to enter a valid response if the input is invalid
+    svDialogs::dlg_message('Please enter a valid response. To continue, please press the "Enter" key or click the "OK" button.')$res
+  }
+}
+
+# Save the results in the selected file format
+if (doyouwant == '1') {
+  file_path <- 'Predictions_table_reduced.xlsx'
+  save_data(df_pred.reduced, file_path)
+  svDialogs::dlg_message('The data file has been generated with the name: "Predictions_table_reduced.xlsx". To continue, please press the "Enter" key or click the "OK" button.')$res
+}
+
+if (doyouwant == '2') {
+  file_path <- 'Predictions_table_reduced.ods'
+  save_data(df_pred.reduced, file_path)
+  svDialogs::dlg_message('The data file has been generated with the name: "Predictions_table_reduced.ods". To continue, please press the "Enter" key or click the "OK" button.')$res
+}
+
+if (doyouwant == '3') {
+  file_path <- 'Predictions_table_reduced.csv'
+  save_data(df_pred.reduced, file_path)
+  svDialogs::dlg_message('The data file has been generated with the name: "Predictions_table_reduced.csv". To continue, please press the "Enter" key or click the "OK" button.')$res
+}
+
+if (doyouwant == '4') {
+  file_path <- 'Predictions_table_reduced.dta'
+  save_data(df_pred.reduced, file_path)
+  svDialogs::dlg_message('The data file has been generated with the name: "Predictions_table_reduced.dta". To continue, please press the "Enter" key or click the "OK" button.')$res
+}
+
+if (doyouwant == '5') {
+  file_path <- 'Predictions_table_reduced.sav'
+  save_data(df_pred.reduced, file_path)
+  svDialogs::dlg_message('The data file has been generated with the name: "Predictions_table_reduced.sav". To continue, please press the "Enter" key or click the "OK" button.')$res
+}
+
+}
+```
+
+
+# LOD_detection(metadata[2,],toclassify[, c("ID", infogram.results@admissible_features)]) to run function LOD
+# write.csv(LOD_detection(metadata[2,],toclassify[, c("ID", infogram.results@admissible_features)]),'LOD_reduced1.csv')
+
+## Application of the natural decay
+This section simulates the decay process. Samples have been classified based on the occurrence of MST markers, but the decay rate of these markers can vary due to factors like temperature, predation, sedimentation, adsorption, and other biological or physical processes. These factors affect the survival or presence of the marker in the matrix. By determining the decay rate, the previous occurrence of markers after a specific time can be predicted. It is assumed that the inactivation rate is constant, following a linear trend, determined by the t90 value of the MST marker.
+
+The steps are:
+1. **Specify Time Period**: The user specifies the time period for simulation, using the same time units as the t90 values (hours, days, weeks, etc.).
+2. **Calculate Occurrence**: The program calculates the increase in occurrence using the t90 values of the markers. This simulation applies only to quantitative variables.
+3. **Save Modified Values**: The modified values are saved in a spreadsheet, which can be edited by the user.
+
+If the user already knows the t90 values and has done the calculations, they can skip this step and proceed with the classification process. Ichnaea can use a previously trained module.
+
+The program asks if any modifications have been made to the data file. It will wait for a response before proceeding. If modifications are confirmed, the user is prompted to upload the modified data file.
+
+```{r message=FALSE, warning=FALSE}
+# Check if the user wants to make corrections based on the previously selected T90 values
+if (tolower(t90_amendment) == 'y') {
+  
+  # Display a message dialog box to inform the user about the upcoming corrections and predictions
+  svDialogs::dlg_message('In the next step, the user will be prompted to enter the desired time span for applying natural decay. A file will then be generated with corrections based on the t90 values and saved as a data file. Please specify the desired spreadsheet format. If any MST marker depends on another, ensure the data file is verified and corrected accordingly. These changes can be uploaded later. To continue, press "Enter" or click "OK".')$res
+  
+  # Display a message dialog box to select the t90 time.
+  svDialogs::dlg_message('Please indicate the time for natural decay in the same units as the t90 values. A linear model will be used to amend the classification dataset. To continue, press "Enter" or click "OK".')$res
+  
+ # Input of the t90.time  
+  repeat {
+    user_input <- svDialogs::dlgInput('Please indicate the time.', password = TRUE)$res
+    
+    # Validate the input
+    if (!is.na(as.numeric(user_input)) && as.numeric(user_input)>0 ) {
+      t90.time <- as.numeric(user_input)
+      svDialogs::dlg_message(paste(t90.time, ' has been selected as a decayment time. To continue, please press the "Enter" key or click the "OK" button.'))$res 
+      selected.dilution.fold<-1
+      break
+    } else {svDialogs::dlg_message('That is an invalid value. Please enter a valid value')$res}
+  }
+  
+  # T90 adjustment
+  # Create a temporary copy of the data to classify
+   names(t90s) -> variables  
+   toclassify -> toclassify.temp
+    
+    # Adjust the values based on the t90 correction formula
+    for (j in 1:length(variables)) {toclassify.temp[[variables[j]]] <- toclassify[[variables[j]]] / 10^(-as.numeric(t90.time) / t90s[,j])}
+
+  # Display a message dialog explaining the preference for preserving the data derived from the data modified by the t90s
+
+    svDialogs::dlg_message('Do you want to save the data derived from the t90 amendments? This step is crucial if you plan to make further modifications, such as adjusting the ratio between different MST markers. To continue, press "Enter" or click "OK".')$res
+
+# If the user indicates that the data should be saved, proceed with the following steps
+  repeat {
+    svDialogs::dlgInput('Please indicate whether you wish to save the file in the Excel (1), Calc (2), CSV (3), Stata (4) or SPSS (5) spreadsheet format (1 to 5).', password = TRUE)$res->doyouwant
+    if (doyouwant %in% c('1', '2', '3', '4', '5')) {
+      break
+    } else {
+      svDialogs::dlg_message('Please enter a valid response. To continue, please press the "Enter" key or click the "OK" button.')$res
+    }
+  }  
+  
+ # Save the data in the selected format and display a confirmation message
+  if (doyouwant=='1' ){
+    file_path <- 'MST markers with t90 amendments.xlsx'
+    save_data(toclassify.temp, file_path)
+    svDialogs::dlg_message('The data file has been generated with the name: "MST markers with t90 amendments.xlsx". To continue, please press the "Enter" key or click the "OK" button.')$res
+  }
+  
+  if (doyouwant=='2' ){
+    file_path <- 'MST markers with t90 amendments.ods'
+    save_data(toclassify.temp, file_path)
+    svDialogs::dlg_message('The data file has been generated with the name: "MST markers with t90 amendments.ods". To continue, please press the "Enter" key or click the "OK" button.')$res
+  }
+  
+  if (doyouwant=='3' ){
+    file_path <- 'MST markers with t90 amendments.csv'
+    save_data(toclassify.temp, file_path)
+    svDialogs::dlg_message('The data file has been generated with the name: "MST markers with t90 amendments.csv". To continue, please press the "Enter" key or click the "OK" button.')$res
+  }  
+  
+  if (doyouwant=='4' ){
+    file_path <- 'MST markers with t90 amendments.dta'
+    save_data(toclassify.temp, file_path)
+    svDialogs::dlg_message('The data file has been generated with the name: "MST markers with t90 amendments.dta". To continue, please press the "Enter" key or click the "OK" button.')$res
+  }    
+  
+  if (doyouwant=='5' ){
+    file_path <- 'MST markers with t90 amendments.sav'
+    save_data(toclassify.temp, file_path)
+    svDialogs::dlg_message('The data file has been generated with the name: "MST markers with t90 amendments.sav". To continue, please press the "Enter" key or click the "OK" button.')$res
+  }
+
+
+# Display a message dialog explaining the preference to reintroduce the augmented data simulation with changes
+svDialogs::dlg_message('The subsequent query concerns the necessity of modifying the data ammended with the natural decay. When utilising a CSV file, please be sure to remove the column containing the row numbers if required. To proceed, please press the "Enter" key or click the "OK" button.')$res
+
+
+# Display an input dialog asking for changes in the file containing the modifications fo t90 data
+
+repeat {
+svDialogs::dlgInput('Before proceeding, the user must indicate whether modifications to the dataset with T90 amendments are required, or if a file containing the changes is already available. If neither is the case, data classification will continue using the previously generated augmented dataset. The user is asked to confirm whether any changes are desired. (y/n)?', password = TRUE)$res->doyouwant
+
+ # Check if the user input is valid (either 'y', 'Y', 'n', or 'N')
+  if (doyouwant %in% c('y', 'Y', 'n', 'N')) {
+    break
+  } else {
+    # Prompt the user to enter a valid response if the input is invalid
+    svDialogs::dlg_message('Please enter a valid response. To continue, please press the "Enter" key or click the "OK" button.')$res
+  }
+}
+
+# Display an input dialog asking if LibreOffice Calc needs to be launched
+if (tolower(doyouwant) == 'y'){
+repeat {
+svDialogs::dlgInput('LibreOffice can open files in CSV, Excel and Calc formats. If either LibreOffice Calc or Excel is installed on your computer, R will attempt to open one of these applications. Would you like R to try to open them. (y/n)?', password = TRUE)$res->doyouwant_calc  
+
+ # Check if the user input is valid (either 'y', 'Y', 'n', or 'N')
+  if (doyouwant_calc %in% c('y', 'Y', 'n', 'N')) {
+    break
+  } else {
+    # Prompt the user to enter a valid response if the input is invalid
+    svDialogs::dlg_message('Please enter a valid response. To continue, please press the "Enter" key or click the "OK" button.')$res
+  }
+}
+}
+
+if (tolower(doyouwant) == 'y' && tolower(doyouwant_calc) == 'y') launch_spreadsheet()
+
+
+# If the user indicates the file is available, proceed with the following steps
+if (tolower(doyouwant) == 'y'){
+  # Display a message dialog prompting the user to indicate the file containing the modified augmented file
+  svDialogs::dlg_message('Please indicate the file that contains the modifications. To proceed, please press the "Enter" key or click the "OK" button.')$res
+  
+  # Open a file dialog for the user to select the dataset, allowing all file types
+  svDialogs::dlg_open(title = "Select the dataset with the modifications", filters = svDialogs::dlg_filters[c('All'), ])$res->data
+  
+  # Import the selected data and convert it into a data frame
+  toclassify.temp<-as.data.frame(import_data(data))
+}
+}
+```
+
+
+## Classification with the complet set of MST-parameters after applying the natural decay
+This section generates a data table of samples classified using a model trained with all MST markers. The user is prompted to choose the spreadsheet format for saving the results.
+
+```{r}
+# Check if the user wants to make corrections based on the previously selected t90 values
+if (tolower(t90_amendment) == 'y') {
+# Convert the adjusted data to H2O format and exclude the first column
+    toclassify_pred.temp <- as.h2o(toclassify.temp[, c(-1)], destination_frame = "Classification_amended_dataset_all_markers")
+    # Predict using the H2O model with all MST markers
+    #toclassify_pred.temp <- h2o.predict(model_h2o@leader, toclassify_pred.temp)
+    toclassify_pred.temp <- h2o.predict(model_h2o, toclassify_pred.temp)
+    # Convert the predictions to a data frame
+    as.data.frame(toclassify_pred.temp) -> toclassify_pred.temp
+    # Combine the original IDs with the predictions
+    cbind(toclassify[, 1], toclassify_pred.temp) -> df_pred.temp
+    # Rename the columns of the combined data frame
+    names(df_pred.temp) <- c('ID', names(toclassify_pred.temp))
+    
+# Display a message dialog explaining the preference for preserving the data derived from the data modified by the t90s
+svDialogs::dlg_message('The subsequent query pertains to the preference for saving the classifications with natural decay in a file. To proceed, please press the "Enter" key or click the "OK" button.')$res
+
+ repeat {
+    svDialogs::dlgInput('Please indicate whether you wish to save the file in the Excel (1), Calc (2), CSV (3), Stata (4) or SPSS (5) spreadsheet format (1 to 5).', password = TRUE)$res->doyouwant
+    if (doyouwant %in% c('1', '2', '3', '4', '5')) {
+      break
+    } else {
+      svDialogs::dlg_message('Please enter a valid response. To continue, please press the "Enter" key or click the "OK" button.')$res
+    }
+  }  
+  
+ # Save the data in the selected format and display a confirmation message
+  if (doyouwant=='1' ){
+    file_path <- 'Classification with natural decay.xlsx'
+    save_data(df_pred.temp, file_path)
+    svDialogs::dlg_message('The data file has been generated with the name: "Classification with natural decay.xlsx". To continue, please press the "Enter" key or click the "OK" button.')$res
+  }
+  
+  if (doyouwant=='2' ){
+    file_path <- 'Classification with natural decay.ods'
+    save_data(df_pred.temp, file_path)
+    svDialogs::dlg_message('The data file has been generated with the name:"Classification with natural decay.ods". To continue, please press the "Enter" key or click the "OK" button.')$res
+  }
+  
+  if (doyouwant=='3' ){
+    file_path <- 'Classification with natural decay.csv'
+    save_data(df_pred.temp, file_path)
+    svDialogs::dlg_message('The data file has been generated with the name: "Classification with natural decay.csv". To continue, please press the "Enter" key or click the "OK" button.')$res
+  }  
+  
+  if (doyouwant=='4' ){
+    file_path <- 'Classification with natural decay.dta'
+    save_data(df_pred.temp, file_path)
+    svDialogs::dlg_message('The data file has been generated with the name: "Classification with natural decay.dta". To continue, please press the "Enter" key or click the "OK" button.')$res
+  }    
+  
+  if (doyouwant=='5' ){
+    file_path <- 'Classification with natural decay.sav'
+    save_data(df_pred.temp, file_path)
+    svDialogs::dlg_message('The data file has been generated with the name: "Classification with natural decay.sav". To continue, please press the "Enter" key or click the "OK" button.')$res
+  }
+}     
+```
+
+
+## Classification with the reduced set of MST-parameters after applying the natural decay
+This section generates a data table of samples classified using a model trained with the reduced set of MST markers. The user is prompted to choose the spreadsheet format for saving the results.
+
+```{r}
+if (tolower(t90_amendment) == 'y') {
+if (tolower(doyouwant.reduction) == 'y') {
+ # Convert the adjusted data to H2O format and exclude the first column
+    toclassify_pred.temp <- as.h2o(toclassify.temp[, c(-1)], destination_frame = "Classification_amended_dataset_reduced_markers")
+    # Predict using the reduced H2O model
+    toclassify_pred.temp <- h2o.predict(model.reduced, toclassify_pred.temp)
+    # Convert the predictions to a data frame
+    as.data.frame(toclassify_pred.temp) -> toclassify_pred.temp
+    # Combine the original IDs with the predictions
+    cbind(toclassify[, 1], toclassify_pred.temp) -> df_pred.temp
+    # Rename the columns of the combined data frame
+    names(df_pred.temp) <- c('ID', names(toclassify_pred.temp))
+    
+# Display a message dialog explaining the preference for preserving the data derived from the data modified by the t90s
+svDialogs::dlg_message('The subsequent query pertains to the preference for saving the classifications with the reduced set of MST-markers natural decay in a file. To proceed, please press the "Enter" key or click the "OK" button.')$res
+
+ repeat {
+    svDialogs::dlgInput('Please indicate whether you wish to save the file in the Excel (1), Calc (2), CSV (3), Stata (4) or SPSS (5) spreadsheet format (1 to 5).', password = TRUE)$res->doyouwant
+    if (doyouwant %in% c('1', '2', '3', '4', '5')) {
+      break
+    } else {
+      svDialogs::dlg_message('Please enter a valid response. To continue, please press the "Enter" key or click the "OK" button.')$res
+    }
+  }  
+  
+ # Save the data in the selected format and display a confirmation message
+  if (doyouwant=='1' ){
+    file_path <- 'Classification with the reduced MST set and natural decay.xlsx'
+    save_data(df_pred.temp, file_path)
+    svDialogs::dlg_message('The data file has been generated with the name: "Classification with the reduced MST set and natural decay.xlsx". To continue, please press the "Enter" key or click the "OK" button.')$res
+  }
+  
+  if (doyouwant=='2' ){
+    file_path <- 'Classification with the reduced MST set and natural decay.ods'
+    save_data(df_pred.temp, file_path)
+    svDialogs::dlg_message('The data file has been generated with the name:"Classification with the reduced MST set and natural decay.ods". To continue, please press the "Enter" key or click the "OK" button.')$res
+  }
+  
+  if (doyouwant=='3' ){
+    file_path <- 'Classification with the reduced MST set and natural decay.csv'
+    save_data(df_pred.temp, file_path)
+    svDialogs::dlg_message('The data file has been generated with the name: "Classification with the reduced MST set and natural decay.csv". To continue, please press the "Enter" key or click the "OK" button.')$res
+  }  
+  
+  if (doyouwant=='4' ){
+    file_path <- 'Classification with the reduced MST set and natural decay.dta'
+    save_data(df_pred.temp, file_path)
+    svDialogs::dlg_message('The data file has been generated with the name: "Classification with the reduced MST set and natural decay.dta". To continue, please press the "Enter" key or click the "OK" button.')$res
+  }    
+  
+  if (doyouwant=='5' ){
+    file_path <- 'Classification with the reduced MST set and natural decay.sav'
+    save_data(df_pred.temp, file_path)
+    svDialogs::dlg_message('The data file has been generated with the name: "CClassification with the reduced MST set and natural decay.sav". To continue, please press the "Enter" key or click the "OK" button.')$res
+  }
+
+} 
+}
+```
+
+
+# Launch h2o.flow 
+The following chunk launches H2O Flow. H2O Flow is a web-based interactive user interface developed by H2O.ai for working with the H2O machine learning platform. H2O Flow provides an interactive environment that functions in a manner analogous to that of a notebook, allowing multiple operations to be conducted by utilising a graphical interface. The initiation of the H2O Flow process is typically characterised by the execution of the H2O JAR file, followed by navigation to the URL http://localhost:54321.
+
+
+```{r}
+# Show a dialogue box with a welcome message 
+svDialogs::dlg_message('H2O Flow is an interactive web interface that allows users to interact with the data and models generated in this module. 
+If you need more information about H2O Flow, or if you need help using it, please visit this website: https://docs.h2o.ai/h2o/latest-stable/h2o-docs/flow.html. The datasets have been assigned clear and descriptive names to facilitate easy identification. Please note that some of the information that can be generated with H2O in this notebook has been omitted. You now have the opportunity to visualise this data. Once you have finished, please close the browser. Should you wish to access it again, please simply re-run this section. Press "Enter" or click "OK".')$res
+
+
+ # Display an input dialog asking if h2o.flow should be launched
+svDialogs::dlgInput('Should H2O Flow be launched (y/n)?', password = TRUE)$res->doyouwant
+  
+ # Check if the user input is valid (either 'y', 'Y', 'n', or 'N')
+  if (doyouwant %in% c('y', 'Y', 'n', 'N')) {
+    break
+  } else {
+    # Prompt the user to enter a valid response if the input is invalid
+    svDialogs::dlg_message('Please enter a valid response. To continue, please press the "Enter" key or click the "OK" button.')$res
+  }
+
+# Initiates H2O Flow
+if (tolower(doyouwant) == 'y'){h2o.flow()}
+```
+
+
+
+
+
+
