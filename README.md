@@ -16,7 +16,6 @@ Key Features:
 
 ✅ Flexible Access: Use locally via RStudio or remotely through a Shiny-based GUI.
 
-
 Who Is It For?
 Whether you're a seasoned microbiologist or just starting to explore machine learning, Ichnaea-MST provides a straightforward, accessible entry point into Microbial Source Tracking (MST).
 Why choose Ichnaea-MST?
@@ -27,12 +26,9 @@ Why choose Ichnaea-MST?
 
 ✅ Supports reproducible, transparent MST workflows.
 
-
 How to Use:
 
 ✅ Local Use: Run the R Notebooks in RStudio, an IDE for R or use the tool via our web-based Shiny GUI.
-
-
 
 In this repository you will find the following files: 
 
@@ -46,5 +42,4 @@ The three source codes:
 
 📊 A results file, Report_Ichnaea_MST.html, provides an example of a report generated from a binomial classification. The classification outputs include two scenarios: one without applying T90 decay, using the full set of MST markers, and another using the reduced set of MST markers, in which the classification incorporates a hypothetical natural decay (a T90 of 48 hours and a residence time of 24 hours).
 
-
-⚠️ In the results report, the data tables from the two EU research initiatives—TOFPSW (2001–2004, EVK1‑CT‑2000‑00080), Tracking the Origin of Faecal Pollution in Surface Waters, and AQUAVALENS (2012–2016, Grant 311846), Protecting the Health of Europeans by Improving Methods for the Detection of Pathogens in Drinking Water and Water Used in Food Preparation—have been expressly omitted. The same note appears in the file description
+⚠️ In the results report, the data tables from the two EU research initiatives—TOFPSW (2001–2004, EVK1‑CT‑2000‑00080), Tracking the Origin of Faecal Pollution in Surface Waters, and AQUAVALENS (2012–2016, Grant 311846), Protecting the Health of Europeans by Improving Methods for the Detection of Pathogens in Drinking Water and Water Used in Food Preparation—have been deliberately omitted. The same note is included in the description of the Report_Ichnaea_MST.html file.
