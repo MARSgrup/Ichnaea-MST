@@ -28,9 +28,10 @@ Why choose Ichnaea-MST?
 ✅ Supports reproducible, transparent MST workflows.
 
 
-How to Use
+How to Use:
 
 ✅ Local Use: Run the R Notebooks in RStudio, an IDE for R or use the tool via our web-based Shiny GUI.
+
 
 
 In this repository you will find the following files: 
