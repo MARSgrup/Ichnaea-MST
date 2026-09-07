@@ -51,6 +51,7 @@ The methodological foundations, implementation, validation, and potential applic
 > **Ichnaea-MST: An automated machine learning tool for Microbial Source Tracking providing prediction of faecal source of contamination in water.**
 > *Environmental Management: Smart Solutions, 1*(1), 100002.
 > https://doi.org/10.1016/j.jemss.2026.100002
- 
+
+
 🔗 **Access the article:** [ScienceDirect](https://www.sciencedirect.com/science/article/pii/S3117649626000026)
 If you use Ichnaea-MST, its source code, or its associated workflows in your research, please cite the publication above.
