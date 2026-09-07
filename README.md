@@ -43,3 +43,14 @@ The three source codes:
 📊 A results file, Report_Ichnaea_MST.html, provides an example of a report generated from a binomial classification. The classification outputs include two scenarios: one without applying T90 decay, using the full set of MST markers, and another using the reduced set of MST markers, in which the classification incorporates a hypothetical natural decay (a T90 of 48 hours and a residence time of 24 hours).
 
 ⚠️ In the results report, the data tables from the two EU research initiatives—TOFPSW (2001–2004, EVK1‑CT‑2000‑00080), Tracking the Origin of Faecal Pollution in Surface Waters, and AQUAVALENS (2012–2016, Grant 311846), Protecting the Health of Europeans by Improving Methods for the Detection of Pathogens in Drinking Water and Water Used in Food Preparation—have been deliberately omitted. The same note is included in the description of the Report_Ichnaea_MST.html file.
+
+## Scientific Publication
+The methodological foundations, implementation, validation, and potential applications of Ichnaea-MST are described in the following scientific article:
+
+> Méndez, J., Monleón, A., Rodríguez, A., & Blanch, A. R. (2026).
+> **Ichnaea-MST: An automated machine learning tool for Microbial Source Tracking providing prediction of faecal source of contamination in water.**
+> *Environmental Management: Smart Solutions, 1*(1), 100002.
+> https://doi.org/10.1016/j.jemss.2026.100002
+ 
+🔗 **Access the article:** [ScienceDirect](https://www.sciencedirect.com/science/article/pii/S3117649626000026)
+If you use Ichnaea-MST, its source code, or its associated workflows in your research, please cite the publication above.
